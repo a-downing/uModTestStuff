@@ -50,6 +50,14 @@ namespace Oxide.Plugins
                 Puts("timer3");
             }, 5.0f);
 
+            var timer4 = timerBehavior.StartTimer(() => {
+                Puts("timer4");
+
+                var timer5 = timerBehavior.StartTimer(() => {
+                    Puts("timer5");
+                }, 5.0f);
+            }, 6.0f);
+
             timerBehavior.StopTimer(timer1);
         }
 
