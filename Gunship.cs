@@ -41,6 +41,10 @@ namespace Oxide.Plugins
             public Vector3 initialVelocity;
         }
 
+        public void Arrow(BasePlayer player, Vector3 from, Vector3 to, float headSize, Color color, float duration) {
+            player.SendConsoleCommand("ddraw.arrow", duration, color, from, to, headSize);
+        }
+
         public static void Sphere(BasePlayer player, Vector3 pos, float radius, Color color, float duration) {
             player.SendConsoleCommand("ddraw.sphere", duration, color, pos, radius);
         }
@@ -249,6 +253,9 @@ namespace Oxide.Plugins
                     if(Mathf.Abs(pilot.gunElevation) > pilot.maxAbsGunElevation) {
                         pilot.gunElevation = pilot.maxAbsGunElevation * Mathf.Sign(pilot.gunElevation);
                     }
+
+                    //Vector3 vec = Quaternion.AngleAxis(pilot.gunElevation, pilot.pilot.eyes.HeadRight()) * pilot.pilot.eyes.HeadForward();
+                    //Arrow(andrew, pilot.pilot.eyes.position, pilot.pilot.eyes.position + vec * 5, 0.1f, Color.green, 0.25f);
                 }
             }
         }
