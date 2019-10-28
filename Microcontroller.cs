@@ -18,7 +18,6 @@ namespace Oxide.Plugins
         static int numChannels = 4;
         static BasePlayer andrew = null;
         bool ignoreSpawn = false;
-        bool ignoreKill = false;
         ulong McuId = 0;
         Dictionary<ulong, McuComponent> McuComponents = new Dictionary<ulong, McuComponent>();
         Dictionary<uint, IOEntityMapper> ioEnts = new Dictionary<uint, IOEntityMapper>();
@@ -104,7 +103,7 @@ namespace Oxide.Plugins
         }
 
         void OnEntityKill(BaseNetworkable entity) {
-            if(ignoreKill || entity.ShortPrefabName != shortName) {
+            if(entity.ShortPrefabName != shortName) {
                 return;
             }
 
@@ -116,15 +115,11 @@ namespace Oxide.Plugins
                 
                 if(McuComponents.TryGetValue(mapper.mcuId, out comp)) {
                     for(int i = 0; i < comp.channels.Length; i++) {
-                        uint netId = comp.channels[i].net.ID;
+                        ioEnts.Remove(comp.channels[i].net.ID);
 
                         if(i != mapper.index) {
-                            ignoreKill = true;
                             comp.channels[i].Kill();
-                            ignoreKill = false;
                         }
-
-                        ioEnts.Remove(netId);
                     }
 
                     McuComponents.Remove(comp.id);
