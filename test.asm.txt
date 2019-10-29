@@ -1,0 +1,46 @@
+#asm
+num now
+num next
+num delay
+
+mov delay 0.25
+gettime now
+add now delay
+mov next rslt
+
+jmp main
+
+isr input
+    num index; pop index
+    num value; getin value index
+    print index index
+    print value value
+    #setout index value
+    sei
+    ret
+
+label main
+    gettime now
+    print next next
+    print now now
+    print delay delay
+    jge now next toggle
+    jmp main
+
+label toggle
+    num energy
+    gettime now
+    add now delay
+    mov next rslt
+    getout energy 0
+
+    je energy 0 on
+    jne energy 0 off
+
+    label off
+       setout 0 0
+       jmp main
+
+    label on
+        setout 0 2
+        jmp main
