@@ -21,9 +21,9 @@ isr input
 
 label main
     gettime now
-    print next next
-    print now now
-    print delay delay
+    #print next next
+    #print now now
+    #print delay delay
     jge now next toggle
     jmp main
 
