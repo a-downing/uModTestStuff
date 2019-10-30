@@ -33,9 +33,20 @@ namespace Oxide.Plugins
 
         class BetterCPU {
             Word[] memory = null;
-            int[] instructions = null;
-            int[] args = new int[4];
-            Word[] values = new Word[4];
+            Instruction[] instructions = null;
+            Word cmp0 = Word.Create(0);
+            Word cmp1 = Word.Create(0);
+
+            /*int pic {
+                get { return memory[(int)Reg.PIC].Int; }
+                set { memory[(int)Reg.PIC].Int = value; }
+            }
+
+            int bsp {
+                get { return memory[(int)Reg.BSP].Int; }
+                set { memory[(int)Reg.BSP].Int = value; }
+            }*/
+
             int pic = 0;
             int bsp = 0;
 
@@ -47,6 +58,10 @@ namespace Oxide.Plugins
                 public uint Uint;
                 [FieldOffset(0)]
                 public float Float;
+
+                public static Word Create(int i) {
+                    return new Word{ Int = i };
+                }
             }
 
             [StructLayout(LayoutKind.Explicit)]
@@ -54,29 +69,52 @@ namespace Oxide.Plugins
                 [FieldOffset(0)]
                 public Word word;
                 [FieldOffset(0)]
-                public byte op;
+                public Opcode op;
                 [FieldOffset(1)]
                 public byte opFlags;
                 [FieldOffset(2)]
                 public byte argFlags;
+
+                public static Instruction Create(int i) {
+                    return new Instruction{ word = new Word{ Int = i } };
+                }
+
+                public static Instruction Create(Opcode op, byte argFlags = 0) {
+                    return new Instruction{ op = op, argFlags = argFlags };
+                }
+
+                public static Instruction Create(Opcode op, byte argFlags1 = 0, byte argFlags2 = 0) {
+                    return new Instruction{ op = op, argFlags = (byte)(argFlags1 | (argFlags2 << 2)) };
+                }
             }
 
-            public enum OpcodeType {
-                CORE = 0
+            public enum Reg {
+                PIC = 0,
+                BSP
             }
 
-            public enum Opcode {
+            public enum Opcode : byte {
                 NOP = 0,
-                MDD,
-                MII,
-                MDI,
-                MID,
+                MOV,
                 JMP,
                 CALL,
+                RET,
                 PUSH,
                 POP,
-                RSHIFT,
-                LSHIFT
+                SHRS,
+                SHRU,
+                SHL,
+                CMPI,
+                JE,
+                JNE,
+                JG,
+                JGE,
+                JL,
+                JLE,
+                AND,
+                OR,
+                XOR,
+                NOT
             }
 
             public enum Status {
@@ -88,24 +126,8 @@ namespace Oxide.Plugins
                 EXCEPTION
             }
 
-            Opcode GetOpcode(int inst) {
-                return (Opcode)((inst & 0xFF000000) >> 24);
-            }
-
-            int GetNumArgs(int inst) {
-                return (int)((inst & 0x00FF0000) >> 16);
-            }
-
-            OpcodeType GetOpcodeType(int inst) {
-                return (OpcodeType)((inst & 0x0000FF00) >> 8);
-            }
-
-            public int MakeInstruction(Opcode opcode, int numArgs, OpcodeType opcodeType) {
-                return (int)opcode << 24 | numArgs << 16 | (int)opcodeType << 8;
-            }
-
-            public void LoadProgram(int[] instructions, Word[] memory, int bsp, int pic = 0) {
-                this.instructions = new int[instructions.Length];
+            public void LoadProgram(Instruction[] instructions, Word[] memory, int bsp, int pic = 0) {
+                this.instructions = new Instruction[instructions.Length];
                 instructions.CopyTo(this.instructions, 0);
                 this.memory = new Word[memory.Length];
                 memory.CopyTo(this.memory, 0);
@@ -114,95 +136,111 @@ namespace Oxide.Plugins
             }
 
             public bool Cycle(out Status status) {
-                if(pic >= instructions.Length) {
+                if(pic < 0 || pic >= instructions.Length) {
                     status = Status.OUT_OF_INSTRUCTIONS;
                     return false;
                 }
 
-                int inst = instructions[pic++];
-                Opcode opcode = GetOpcode(inst);
-                OpcodeType instType = GetOpcodeType(inst);
-
-                switch(instType) {
-                    case OpcodeType.CORE:
-                        goto core;
+                if(bsp < 0 || bsp >= memory.Length) {
+                    status = Status.SEGFAULT;
+                    return false;
                 }
 
-                core:
-                switch(opcode) {
-                    case Opcode.MDD:
-                        args[0] = instructions[pic++];
-                        args[1] = instructions[pic++];
-                        memory[args[0]] = memory[args[1]];
+                Instruction inst = instructions[pic++];
+                Word arg0 = Word.Create(0), arg1 = arg0;
+
+                switch(inst.argFlags) {
+                    case (1 << 0):
+                        arg0 = instructions[pic++].word;
                         break;
-                    case Opcode.MII:
-                        args[0] = instructions[pic++];
-                        args[1] = instructions[pic++];
-                        values[0] = memory[args[0]];
-                        values[1] = memory[args[1]];
-
-                        if(values[0].Int < 0 || values[0].Int >= memory.Length) {
-                            status = Status.SEGFAULT;
-                            return false;
-                        }
-
-                        if(values[1].Int < 0 || values[1].Int >= memory.Length) {
-                            status = Status.SEGFAULT;
-                            return false;
-                        }
-
-                        memory[values[0].Int] = memory[values[1].Int];
+                    case (2 << 0):
+                        arg0 = instructions[pic++].word;
+                        arg0 = memory[arg0.Int];
                         break;
-                    case Opcode.MDI:
-                        args[0] = instructions[pic++];
-                        args[1] = instructions[pic++];
-                        values[1] = memory[args[1]];
-
-                        if(values[1].Int < 0 || values[1].Int >= memory.Length) {
-                            status = Status.SEGFAULT;
-                            return false;
-                        }
-
-                        memory[args[0]] = memory[values[1].Int];
+                    case (1 << 0) | (1 << 2):
+                        arg0 = instructions[pic++].word;
+                        arg1 = instructions[pic++].word;
                         break;
-                    case Opcode.MID:
-                        args[0] = instructions[pic++];
-                        args[1] = instructions[pic++];
-                        values[0] = memory[args[0]];
+                    case (2 << 0) | (1 << 2):
+                        arg0 = instructions[pic++].word;
+                        arg0 = memory[arg0.Int];
+                        arg1 = instructions[pic++].word;
+                        break;
+                    case (1 << 0) | (2 << 2):
+                        arg0 = instructions[pic++].word;
+                        arg1 = instructions[pic++].word;
+                        arg1 = memory[arg1.Int];
+                        break;
+                    case (2 << 0) | (2 << 2):
+                        arg0 = instructions[pic++].word;
+                        arg0 = memory[arg0.Int];
+                        arg1 = instructions[pic++].word;
+                        arg1 = memory[arg1.Int];
+                        break;
+                }
 
-                        if(values[0].Int < 0 || values[0].Int >= memory.Length) {
-                            status = Status.SEGFAULT;
-                            return false;
-                        }
-
-                        memory[values[0].Int] = memory[args[1]];
+                switch(inst.op) {
+                    case Opcode.MOV:
+                        memory[arg0.Int] = memory[arg1.Int];
                         break;
                     case Opcode.JMP:
-                        args[0] = instructions[pic++];
-                        pic = memory[args[0]].Int;
+                        pic = arg0.Int;
                         break;
                     case Opcode.CALL:
-                        args[0] = instructions[pic++];
-                        memory[bsp++] = new Word{ Int = pic };
-                        pic = memory[args[0]].Int;
+                        memory[bsp++].Int = pic;
+                        pic = arg0.Int;
+                        break;
+                    case Opcode.RET:
+                        pic = memory[bsp--].Int;
                         break;
                     case Opcode.PUSH:
-                        args[0] = instructions[pic++];
-                        memory[bsp++] = memory[args[0]];
+                        memory[bsp++] = arg0;
                         break;
                     case Opcode.POP:
-                        args[0] = instructions[pic++];
-                        memory[args[0]] = memory[bsp--];
+                        memory[arg0.Int] = memory[bsp--];
                         break;
-                    case Opcode.RSHIFT:
-                        args[0] = instructions[pic++];
-                        args[1] = instructions[pic++];
-                        memory[args[0]].Uint = memory[args[0]].Uint >> memory[args[1]].Int;
+                    case Opcode.SHRS:
+                        memory[arg0.Int].Int = memory[arg0.Int].Int >> arg1.Int;
                         break;
-                    case Opcode.LSHIFT:
-                        args[0] = instructions[pic++];
-                        args[1] = instructions[pic++];
-                        memory[args[0]].Uint = memory[args[0]].Uint << memory[args[1]].Int;
+                    case Opcode.SHRU:
+                        memory[arg0.Int].Uint = memory[arg0.Int].Uint >> arg1.Int;
+                        break;
+                    case Opcode.SHL:
+                        memory[arg0.Int].Int = memory[arg0.Int].Int << arg1.Int;
+                        break;
+                    case Opcode.CMPI:
+                        cmp0.Int = arg0.Int;
+                        cmp1.Int = arg1.Int;
+                        break;
+                    case Opcode.JE:
+                        pic = (cmp0.Int == cmp1.Int) ? arg0.Int : pic;
+                        break;
+                    case Opcode.JNE:
+                        pic = (cmp0.Int != cmp1.Int) ? arg0.Int : pic;
+                        break;
+                    case Opcode.JG:
+                        pic = (cmp0.Int > cmp1.Int) ? arg0.Int : pic;
+                        break;
+                    case Opcode.JGE:
+                        pic = (cmp0.Int >= cmp1.Int) ? arg0.Int : pic;
+                        break;
+                    case Opcode.JL:
+                        pic = (cmp0.Int < cmp1.Int) ? arg0.Int : pic;
+                        break;
+                    case Opcode.JLE:
+                        pic = (cmp0.Int <= cmp1.Int) ? arg0.Int : pic;
+                        break;
+                    case Opcode.AND:
+                        memory[arg0.Int].Int = memory[arg0.Int].Int & arg1.Int;
+                        break;
+                    case Opcode.OR:
+                        memory[arg0.Int].Int = memory[arg0.Int].Int | arg1.Int;
+                        break;
+                    case Opcode.XOR:
+                        memory[arg0.Int].Int = memory[arg0.Int].Int ^ arg1.Int;
+                        break;
+                    case Opcode.NOT:
+                        memory[arg0.Int].Int = ~memory[arg0.Int].Int;
                         break;
                     default:
                         status = Status.MISSING_INSTRUCTION;
@@ -237,27 +275,31 @@ namespace Oxide.Plugins
             manager.Init(this);
 
             BetterCPU.Word[] data = new BetterCPU.Word[] {
-                new BetterCPU.Word{ Int = 0 },
-                new BetterCPU.Word{ Int = 33 },
-                new BetterCPU.Word{ Int = 42 },
-                new BetterCPU.Word{ Int = 8 },
-                new BetterCPU.Word{ Int = 1 },
-                new BetterCPU.Word{ Int = 2 },
+                BetterCPU.Word.Create(0),
+                BetterCPU.Word.Create(0),
+                BetterCPU.Word.Create(0),
+                BetterCPU.Word.Create(33),
+                BetterCPU.Word.Create(42),
+                BetterCPU.Word.Create(8),
+                BetterCPU.Word.Create(1),
+                BetterCPU.Word.Create(2),
             };
 
             BetterCPU.Word[] memory = new BetterCPU.Word[1024];
             data.CopyTo(memory, 0);
 
-            int[] instructions = new int[] {
-                betterCPU.MakeInstruction(BetterCPU.Opcode.MDD, 2, BetterCPU.OpcodeType.CORE), 1, 2,
-                betterCPU.MakeInstruction(BetterCPU.Opcode.MII, 2, BetterCPU.OpcodeType.CORE), 4, 5,
-                betterCPU.MakeInstruction(BetterCPU.Opcode.MDI, 2, BetterCPU.OpcodeType.CORE), 1, 5,
-                betterCPU.MakeInstruction(BetterCPU.Opcode.MID, 2, BetterCPU.OpcodeType.CORE), 4, 2,
-                betterCPU.MakeInstruction(BetterCPU.Opcode.PUSH, 1, BetterCPU.OpcodeType.CORE) , 1,
-                betterCPU.MakeInstruction(BetterCPU.Opcode.POP, 1, BetterCPU.OpcodeType.CORE), 2,
-                betterCPU.MakeInstruction(BetterCPU.Opcode.RSHIFT, 2, BetterCPU.OpcodeType.CORE), 2, 3,
-                betterCPU.MakeInstruction(BetterCPU.Opcode.LSHIFT, 2, BetterCPU.OpcodeType.CORE), 2, 3,
-                betterCPU.MakeInstruction(BetterCPU.Opcode.JMP, 1, BetterCPU.OpcodeType.CORE) , 0
+            BetterCPU.Instruction[] instructions = new BetterCPU.Instruction[] {
+                BetterCPU.Instruction.Create(BetterCPU.Opcode.MOV, 1, 1), BetterCPU.Instruction.Create(1), BetterCPU.Instruction.Create(2),
+                BetterCPU.Instruction.Create(BetterCPU.Opcode.MOV, 2, 2), BetterCPU.Instruction.Create(4), BetterCPU.Instruction.Create(5),
+                BetterCPU.Instruction.Create(BetterCPU.Opcode.MOV, 1, 2), BetterCPU.Instruction.Create(1), BetterCPU.Instruction.Create(5),
+                BetterCPU.Instruction.Create(BetterCPU.Opcode.MOV, 2, 1), BetterCPU.Instruction.Create(4), BetterCPU.Instruction.Create(2),
+                BetterCPU.Instruction.Create(BetterCPU.Opcode.PUSH, 1), BetterCPU.Instruction.Create(1),
+                BetterCPU.Instruction.Create(BetterCPU.Opcode.POP, 1), BetterCPU.Instruction.Create(2),
+                BetterCPU.Instruction.Create(BetterCPU.Opcode.SHRS, 1, 1), BetterCPU.Instruction.Create(2), BetterCPU.Instruction.Create(3),
+                BetterCPU.Instruction.Create(BetterCPU.Opcode.SHL, 1, 1), BetterCPU.Instruction.Create(2), BetterCPU.Instruction.Create(3),
+                BetterCPU.Instruction.Create(BetterCPU.Opcode.CMPI, 1, 1), BetterCPU.Instruction.Create(42), BetterCPU.Instruction.Create(42),
+                BetterCPU.Instruction.Create(BetterCPU.Opcode.JE, 1), BetterCPU.Instruction.Create(0),
+                BetterCPU.Instruction.Create(BetterCPU.Opcode.JMP, 1), BetterCPU.Instruction.Create(4342342)
             };
 
             betterCPU.LoadProgram(instructions, memory, data.Length);
