@@ -9,6 +9,8 @@ using Newtonsoft.Json;
 using System.Text.RegularExpressions;
 using UnityEngine;
 
+using System.Runtime.InteropServices;
+
 namespace Oxide.Plugins
 {
     [Info("Microcontroller", "Andrew", "0.0.0")]
@@ -25,6 +27,154 @@ namespace Oxide.Plugins
         Dictionary<uint, IOEntityMapper> ioEnts = new Dictionary<uint, IOEntityMapper>();
         McuManager manager = null;
         const int maxAvgCharsPerLine = 32;
+        
+        //testing
+        BetterCPU betterCPU = new BetterCPU();
+
+        class BetterCPU {
+            Union[] memory = null;
+            uint[] instructions = null;
+            int[] args = new int[8];
+            int pic = 0;
+            int bsp = 0;
+
+            [StructLayout(LayoutKind.Explicit)]
+            public struct Union {
+                [FieldOffset(0)]
+                public int Int;
+                [FieldOffset(0)]
+                public uint Uint;
+                [FieldOffset(0)]
+                public float Float;
+            }
+
+            public enum OpcodeType : byte {
+                CORE = 0
+            }
+
+            public enum Opcode : byte {
+                NOP = 0,
+                MOV,
+                JMP,
+                CALL,
+                PUSH,
+                POP,
+                RSHIFT,
+                LSHIFT
+            }
+
+            // I dunno
+            public enum ArgType : byte {
+                NONE = 0,
+                IMMEDIATE,
+                INDIRECT_0,
+                INDIRECT_1,
+            }
+
+            public enum Status {
+                SUCCESS,
+                OUT_OF_INSTRUCTIONS,
+                MISSING_INSTRUCTION,
+                BAD_INSTRUCTION,
+                SEGFAULT
+            }
+
+            Opcode GetOpcode(uint inst) {
+                return (Opcode)((inst & 0xFF000000) >> 24);
+            }
+
+            int GetNumArgs(uint inst) {
+                return (int)((inst & 0x00FF0000) >> 16);
+            }
+
+            OpcodeType GetOpcodeType(uint inst) {
+                return (OpcodeType)((inst & 0x0000FF00) >> 8);
+            }
+
+            public uint MakeInstruction(Opcode opcode, int numArgs, OpcodeType opcodeType) {
+                return (uint)opcode << 24 | (uint)numArgs << 16 | (uint)opcodeType << 8;
+            }
+
+            public void LoadProgram(uint[] instructions, Union[] memory, int bsp, int pic = 0) {
+                this.instructions = new uint[instructions.Length];
+                instructions.CopyTo(this.instructions, 0);
+                this.memory = new Union[memory.Length];
+                memory.CopyTo(this.memory, 0);
+                this.pic = pic;
+                this.bsp = bsp;
+            }
+
+            void SetMem(int index, Union value) {
+                memory[index] = value;
+            }
+
+            Union GetMem(int index) {
+                return memory[index];
+            }
+
+            public bool Cycle(out Status status) {
+                if(pic >= instructions.Length) {
+                    status = Status.OUT_OF_INSTRUCTIONS;
+                    return false;
+                }
+
+                uint inst = instructions[pic++];
+                Opcode opcode = GetOpcode(inst);
+                int numArgs = GetNumArgs(inst);
+                OpcodeType instType = GetOpcodeType(inst);
+
+                if(numArgs >= args.Length) {
+                    status = Status.BAD_INSTRUCTION;
+                    return false;
+                }
+
+                for(int i = 0; i < numArgs; i++) {
+                    args[i] = (int)instructions[pic++];
+
+                    /*if(args[i] >= memory.Length) {
+                        status = Status.SEGFAULT;
+                        return false;
+                    }*/
+                }
+
+                switch(instType) {
+                    case OpcodeType.CORE:
+                        goto core;
+                }
+
+                core:
+                switch(opcode) {
+                    case Opcode.MOV:
+                        SetMem(args[0], GetMem(args[1]));
+                        break;
+                    case Opcode.JMP:
+                        pic = memory[args[0]].Int;
+                        break;
+                    case Opcode.CALL:
+                        memory[bsp++] = new Union{ Int = pic };
+                        pic = memory[args[0]].Int;
+                        break;
+                    case Opcode.PUSH:
+                        memory[bsp++] = memory[args[0]];
+                        break;
+                    case Opcode.POP:
+                        memory[args[0]] = memory[bsp--];
+                        break;
+                    case Opcode.RSHIFT:
+                        memory[args[0]].Uint = memory[args[0]].Uint >> memory[args[1]].Int;
+                        break;
+                    case Opcode.LSHIFT:
+                        memory[args[0]].Uint = memory[args[0]].Uint << memory[args[1]].Int;
+                        break;
+                    default:
+                        status = Status.MISSING_INSTRUCTION;
+                        return false;
+                }
+
+                status = Status.SUCCESS;
+                return true;
+            }
+        }
 
         struct IOEntityMapper {
             public ulong mcuId;
@@ -47,6 +197,41 @@ namespace Oxide.Plugins
             var go = new GameObject(McuManager.Guid);
             manager = go.AddComponent<McuManager>();
             manager.Init(this);
+
+            BetterCPU.Union[] data = new BetterCPU.Union[] {
+                new BetterCPU.Union{ Uint = 0 },
+                new BetterCPU.Union{ Uint = 33 },
+                new BetterCPU.Union{ Uint = 42 },
+                new BetterCPU.Union{ Uint = 8 },
+            };
+
+            BetterCPU.Union[] memory = new BetterCPU.Union[1024];
+            data.CopyTo(memory, 0);
+
+            uint[] instructions = new uint[] {
+                betterCPU.MakeInstruction(BetterCPU.Opcode.MOV, 2, BetterCPU.OpcodeType.CORE), 1, 2,
+                betterCPU.MakeInstruction(BetterCPU.Opcode.PUSH, 1, BetterCPU.OpcodeType.CORE) , 1,
+                betterCPU.MakeInstruction(BetterCPU.Opcode.POP, 1, BetterCPU.OpcodeType.CORE), 2,
+                betterCPU.MakeInstruction(BetterCPU.Opcode.RSHIFT, 2, BetterCPU.OpcodeType.CORE), 2, 3,
+                betterCPU.MakeInstruction(BetterCPU.Opcode.LSHIFT, 2, BetterCPU.OpcodeType.CORE), 2, 3,
+                betterCPU.MakeInstruction(BetterCPU.Opcode.JMP, 1, BetterCPU.OpcodeType.CORE) , 0
+            };
+
+            betterCPU.LoadProgram(instructions, memory, data.Length);
+            float startTime = Time.realtimeSinceStartup;
+            int numInstructions = 10000000;
+
+            for(int i = 0; i < numInstructions; i++) {
+                BetterCPU.Status status;
+
+                if(!betterCPU.Cycle(out status)) {
+                    Print($"cpu error: {status.ToString()}");
+                    break;
+                }
+            }
+
+            float elapsedTime = Time.realtimeSinceStartup - startTime;
+            Print($"{numInstructions} in {elapsedTime}s ({numInstructions / elapsedTime} instructions/s)");
         }
 
         void Unload() {
