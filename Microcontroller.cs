@@ -32,14 +32,15 @@ namespace Oxide.Plugins
         BetterCPU betterCPU = new BetterCPU();
 
         class BetterCPU {
-            Union[] memory = null;
-            uint[] instructions = null;
-            int[] args = new int[8];
+            Word[] memory = null;
+            int[] instructions = null;
+            int[] args = new int[4];
+            Word[] values = new Word[4];
             int pic = 0;
             int bsp = 0;
 
             [StructLayout(LayoutKind.Explicit)]
-            public struct Union {
+            public struct Word {
                 [FieldOffset(0)]
                 public int Int;
                 [FieldOffset(0)]
@@ -48,13 +49,28 @@ namespace Oxide.Plugins
                 public float Float;
             }
 
-            public enum OpcodeType : byte {
+            [StructLayout(LayoutKind.Explicit)]
+            public struct Instruction {
+                [FieldOffset(0)]
+                public Word word;
+                [FieldOffset(0)]
+                public byte op;
+                [FieldOffset(1)]
+                public byte opFlags;
+                [FieldOffset(2)]
+                public byte argFlags;
+            }
+
+            public enum OpcodeType {
                 CORE = 0
             }
 
-            public enum Opcode : byte {
+            public enum Opcode {
                 NOP = 0,
-                MOV,
+                MDD,
+                MII,
+                MDI,
+                MID,
                 JMP,
                 CALL,
                 PUSH,
@@ -63,53 +79,38 @@ namespace Oxide.Plugins
                 LSHIFT
             }
 
-            // I dunno
-            public enum ArgType : byte {
-                NONE = 0,
-                IMMEDIATE,
-                INDIRECT_0,
-                INDIRECT_1,
-            }
-
             public enum Status {
                 SUCCESS,
                 OUT_OF_INSTRUCTIONS,
                 MISSING_INSTRUCTION,
                 BAD_INSTRUCTION,
-                SEGFAULT
+                SEGFAULT,
+                EXCEPTION
             }
 
-            Opcode GetOpcode(uint inst) {
+            Opcode GetOpcode(int inst) {
                 return (Opcode)((inst & 0xFF000000) >> 24);
             }
 
-            int GetNumArgs(uint inst) {
+            int GetNumArgs(int inst) {
                 return (int)((inst & 0x00FF0000) >> 16);
             }
 
-            OpcodeType GetOpcodeType(uint inst) {
+            OpcodeType GetOpcodeType(int inst) {
                 return (OpcodeType)((inst & 0x0000FF00) >> 8);
             }
 
-            public uint MakeInstruction(Opcode opcode, int numArgs, OpcodeType opcodeType) {
-                return (uint)opcode << 24 | (uint)numArgs << 16 | (uint)opcodeType << 8;
+            public int MakeInstruction(Opcode opcode, int numArgs, OpcodeType opcodeType) {
+                return (int)opcode << 24 | numArgs << 16 | (int)opcodeType << 8;
             }
 
-            public void LoadProgram(uint[] instructions, Union[] memory, int bsp, int pic = 0) {
-                this.instructions = new uint[instructions.Length];
+            public void LoadProgram(int[] instructions, Word[] memory, int bsp, int pic = 0) {
+                this.instructions = new int[instructions.Length];
                 instructions.CopyTo(this.instructions, 0);
-                this.memory = new Union[memory.Length];
+                this.memory = new Word[memory.Length];
                 memory.CopyTo(this.memory, 0);
                 this.pic = pic;
                 this.bsp = bsp;
-            }
-
-            void SetMem(int index, Union value) {
-                memory[index] = value;
-            }
-
-            Union GetMem(int index) {
-                return memory[index];
             }
 
             public bool Cycle(out Status status) {
@@ -118,24 +119,9 @@ namespace Oxide.Plugins
                     return false;
                 }
 
-                uint inst = instructions[pic++];
+                int inst = instructions[pic++];
                 Opcode opcode = GetOpcode(inst);
-                int numArgs = GetNumArgs(inst);
                 OpcodeType instType = GetOpcodeType(inst);
-
-                if(numArgs >= args.Length) {
-                    status = Status.BAD_INSTRUCTION;
-                    return false;
-                }
-
-                for(int i = 0; i < numArgs; i++) {
-                    args[i] = (int)instructions[pic++];
-
-                    /*if(args[i] >= memory.Length) {
-                        status = Status.SEGFAULT;
-                        return false;
-                    }*/
-                }
 
                 switch(instType) {
                     case OpcodeType.CORE:
@@ -144,26 +130,78 @@ namespace Oxide.Plugins
 
                 core:
                 switch(opcode) {
-                    case Opcode.MOV:
-                        SetMem(args[0], GetMem(args[1]));
+                    case Opcode.MDD:
+                        args[0] = instructions[pic++];
+                        args[1] = instructions[pic++];
+                        memory[args[0]] = memory[args[1]];
+                        break;
+                    case Opcode.MII:
+                        args[0] = instructions[pic++];
+                        args[1] = instructions[pic++];
+                        values[0] = memory[args[0]];
+                        values[1] = memory[args[1]];
+
+                        if(values[0].Int < 0 || values[0].Int >= memory.Length) {
+                            status = Status.SEGFAULT;
+                            return false;
+                        }
+
+                        if(values[1].Int < 0 || values[1].Int >= memory.Length) {
+                            status = Status.SEGFAULT;
+                            return false;
+                        }
+
+                        memory[values[0].Int] = memory[values[1].Int];
+                        break;
+                    case Opcode.MDI:
+                        args[0] = instructions[pic++];
+                        args[1] = instructions[pic++];
+                        values[1] = memory[args[1]];
+
+                        if(values[1].Int < 0 || values[1].Int >= memory.Length) {
+                            status = Status.SEGFAULT;
+                            return false;
+                        }
+
+                        memory[args[0]] = memory[values[1].Int];
+                        break;
+                    case Opcode.MID:
+                        args[0] = instructions[pic++];
+                        args[1] = instructions[pic++];
+                        values[0] = memory[args[0]];
+
+                        if(values[0].Int < 0 || values[0].Int >= memory.Length) {
+                            status = Status.SEGFAULT;
+                            return false;
+                        }
+
+                        memory[values[0].Int] = memory[args[1]];
                         break;
                     case Opcode.JMP:
+                        args[0] = instructions[pic++];
                         pic = memory[args[0]].Int;
                         break;
                     case Opcode.CALL:
-                        memory[bsp++] = new Union{ Int = pic };
+                        args[0] = instructions[pic++];
+                        memory[bsp++] = new Word{ Int = pic };
                         pic = memory[args[0]].Int;
                         break;
                     case Opcode.PUSH:
+                        args[0] = instructions[pic++];
                         memory[bsp++] = memory[args[0]];
                         break;
                     case Opcode.POP:
+                        args[0] = instructions[pic++];
                         memory[args[0]] = memory[bsp--];
                         break;
                     case Opcode.RSHIFT:
+                        args[0] = instructions[pic++];
+                        args[1] = instructions[pic++];
                         memory[args[0]].Uint = memory[args[0]].Uint >> memory[args[1]].Int;
                         break;
                     case Opcode.LSHIFT:
+                        args[0] = instructions[pic++];
+                        args[1] = instructions[pic++];
                         memory[args[0]].Uint = memory[args[0]].Uint << memory[args[1]].Int;
                         break;
                     default:
@@ -198,18 +236,23 @@ namespace Oxide.Plugins
             manager = go.AddComponent<McuManager>();
             manager.Init(this);
 
-            BetterCPU.Union[] data = new BetterCPU.Union[] {
-                new BetterCPU.Union{ Uint = 0 },
-                new BetterCPU.Union{ Uint = 33 },
-                new BetterCPU.Union{ Uint = 42 },
-                new BetterCPU.Union{ Uint = 8 },
+            BetterCPU.Word[] data = new BetterCPU.Word[] {
+                new BetterCPU.Word{ Int = 0 },
+                new BetterCPU.Word{ Int = 33 },
+                new BetterCPU.Word{ Int = 42 },
+                new BetterCPU.Word{ Int = 8 },
+                new BetterCPU.Word{ Int = 1 },
+                new BetterCPU.Word{ Int = 2 },
             };
 
-            BetterCPU.Union[] memory = new BetterCPU.Union[1024];
+            BetterCPU.Word[] memory = new BetterCPU.Word[1024];
             data.CopyTo(memory, 0);
 
-            uint[] instructions = new uint[] {
-                betterCPU.MakeInstruction(BetterCPU.Opcode.MOV, 2, BetterCPU.OpcodeType.CORE), 1, 2,
+            int[] instructions = new int[] {
+                betterCPU.MakeInstruction(BetterCPU.Opcode.MDD, 2, BetterCPU.OpcodeType.CORE), 1, 2,
+                betterCPU.MakeInstruction(BetterCPU.Opcode.MII, 2, BetterCPU.OpcodeType.CORE), 4, 5,
+                betterCPU.MakeInstruction(BetterCPU.Opcode.MDI, 2, BetterCPU.OpcodeType.CORE), 1, 5,
+                betterCPU.MakeInstruction(BetterCPU.Opcode.MID, 2, BetterCPU.OpcodeType.CORE), 4, 2,
                 betterCPU.MakeInstruction(BetterCPU.Opcode.PUSH, 1, BetterCPU.OpcodeType.CORE) , 1,
                 betterCPU.MakeInstruction(BetterCPU.Opcode.POP, 1, BetterCPU.OpcodeType.CORE), 2,
                 betterCPU.MakeInstruction(BetterCPU.Opcode.RSHIFT, 2, BetterCPU.OpcodeType.CORE), 2, 3,
