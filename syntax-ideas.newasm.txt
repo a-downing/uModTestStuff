@@ -1,0 +1,31 @@
+.const input_port 1
+.const output_port 2
+
+.word last_input
+.word input_value
+
+mov last_input 0
+mov input_value 0
+jmp main
+
+isr_input:
+    in input_value input_port
+    push input_value
+    call do_output
+    mov last_input input_value
+    sei
+    ret
+
+do_output:
+    pop r8
+    not r8
+    out output_port r8
+    ret
+
+main:
+    in input_value input_port
+    push input_value
+    call do_output
+
+loop:
+        jmp loop

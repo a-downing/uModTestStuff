@@ -114,7 +114,12 @@ namespace Oxide.Plugins
                 AND,
                 OR,
                 XOR,
-                NOT
+                NOT,
+                ADD,
+                SUB,
+                MUL,
+                DIV,
+                MOD,
             }
 
             public enum Status {
@@ -123,7 +128,7 @@ namespace Oxide.Plugins
                 MISSING_INSTRUCTION,
                 BAD_INSTRUCTION,
                 SEGFAULT,
-                EXCEPTION
+                DIVISION_BY_ZERO
             }
 
             public void LoadProgram(Instruction[] instructions, Word[] memory, int bsp, int pic = 0) {
@@ -241,6 +246,31 @@ namespace Oxide.Plugins
                         break;
                     case Opcode.NOT:
                         memory[arg0.Int].Int = ~memory[arg0.Int].Int;
+                        break;
+                    case Opcode.ADD:
+                        memory[arg0.Int].Int = memory[arg0.Int].Int + arg1.Int;
+                        break;
+                    case Opcode.SUB:
+                        memory[arg0.Int].Int = memory[arg0.Int].Int - arg1.Int;
+                        break;
+                    case Opcode.MUL:
+                        memory[arg0.Int].Int = memory[arg0.Int].Int * arg1.Int;
+                        break;
+                    case Opcode.DIV:
+                        if(arg1.Int == 0) {
+                            status = Status.DIVISION_BY_ZERO;
+                            return false;
+                        }
+
+                        memory[arg0.Int].Int = memory[arg0.Int].Int / arg1.Int;
+                        break;
+                    case Opcode.MOD:
+                        if(arg1.Int == 0) {
+                            status = Status.DIVISION_BY_ZERO;
+                            return false;
+                        }
+
+                        memory[arg0.Int].Int = memory[arg0.Int].Int % arg1.Int;
                         break;
                     default:
                         status = Status.MISSING_INSTRUCTION;
