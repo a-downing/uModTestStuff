@@ -48,7 +48,7 @@ namespace Oxide.Plugins
             }*/
 
             int pic = 0;
-            int bsp = 0;
+            int sp = 0;
 
             [StructLayout(LayoutKind.Explicit)]
             public struct Word {
@@ -88,10 +88,10 @@ namespace Oxide.Plugins
                 }
             }
 
-            public enum Reg {
+            /*public enum Reg {
                 PIC = 0,
                 BSP
-            }
+            }*/
 
             public enum Opcode : byte {
                 NOP = 0,
@@ -137,7 +137,7 @@ namespace Oxide.Plugins
                 this.memory = new Word[memory.Length];
                 memory.CopyTo(this.memory, 0);
                 this.pic = pic;
-                this.bsp = bsp;
+                this.sp = bsp;
             }
 
             public bool Cycle(out Status status) {
@@ -146,7 +146,7 @@ namespace Oxide.Plugins
                     return false;
                 }
 
-                if(bsp < 0 || bsp >= memory.Length) {
+                if(sp < 0 || sp >= memory.Length) {
                     status = Status.SEGFAULT;
                     return false;
                 }
@@ -192,17 +192,17 @@ namespace Oxide.Plugins
                         pic = arg0.Int;
                         break;
                     case Opcode.CALL:
-                        memory[bsp++].Int = pic;
+                        memory[sp++].Int = pic;
                         pic = arg0.Int;
                         break;
                     case Opcode.RET:
-                        pic = memory[bsp--].Int;
+                        pic = memory[sp--].Int;
                         break;
                     case Opcode.PUSH:
-                        memory[bsp++] = arg0;
+                        memory[sp++] = arg0;
                         break;
                     case Opcode.POP:
-                        memory[arg0.Int] = memory[bsp--];
+                        memory[arg0.Int] = memory[sp--];
                         break;
                     case Opcode.SHRS:
                         memory[arg0.Int].Int = memory[arg0.Int].Int >> arg1.Int;
