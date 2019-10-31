@@ -28,21 +28,21 @@ namespace Oxide.Plugins
         McuManager manager = null;
         const int maxAvgCharsPerLine = 32;
         
-        //testing
-        BetterCPU betterCPU = new BetterCPU();
-        BetterCompiler betterCompiler = new BetterCompiler();
+        //testing new cpu/assembler
+        VirtualCPU virtualCPU = new VirtualCPU();
+        VirtualCPUAssembler virtualCPUAssembler = new VirtualCPUAssembler();
 
-        class BetterCompiler {
+        class VirtualCPUAssembler {
             List<string[]> codeLines = new List<string[]>();
             List<Token[]> tokens = new List<Token[]>();
             Dictionary<string, Symbol> symbols = new Dictionary<string, Symbol>();
             public List<string> errors = new List<string>();
-            public List<BetterCPU.Word> programData = new List<BetterCPU.Word>();
-            public List<BetterCPU.Instruction> instructions = new List<BetterCPU.Instruction>();
-            public BetterCPU.Word[] memory = null;
+            public List<VirtualCPU.Word> programData = new List<VirtualCPU.Word>();
+            public List<VirtualCPU.Instruction> instructions = new List<VirtualCPU.Instruction>();
+            public VirtualCPU.Word[] memory = null;
 
             struct Symbol {
-                public BetterCPU.Word word;
+                public VirtualCPU.Word word;
                 public Type type;
 
                 public enum Type {
@@ -67,7 +67,7 @@ namespace Oxide.Plugins
                 public string stringValue;
                 public int intValue;
                 public float floatValue;
-                public BetterCPU.Word word;
+                public VirtualCPU.Word word;
 
                 public override string ToString() {
                     return $"{{{type.ToString()}:{stringValue} indirect:{indirect} intValue:{intValue} floatValue:{floatValue}}}";
@@ -92,20 +92,20 @@ namespace Oxide.Plugins
                     return false;
                 }
 
-                memory = new BetterCPU.Word[memorySize];
+                memory = new VirtualCPU.Word[memorySize];
                 programData.CopyTo(memory, 0);
 
                 return true;
             }
 
-            bool TryStringToOpcode(string str, out BetterCPU.Opcode opcode) {
-                var names = Enum.GetNames(typeof(BetterCPU.Opcode));
-                var values = Enum.GetValues(typeof(BetterCPU.Opcode));
+            bool TryStringToOpcode(string str, out VirtualCPU.Opcode opcode) {
+                var names = Enum.GetNames(typeof(VirtualCPU.Opcode));
+                var values = Enum.GetValues(typeof(VirtualCPU.Opcode));
                 str = str.ToUpperInvariant();
                 
                 for(int i = 0; i < names.Length; i++) {
                     if(names[i] == str) {
-                        opcode = (BetterCPU.Opcode)values.GetValue(i);
+                        opcode = (VirtualCPU.Opcode)values.GetValue(i);
                         return true;
                     }
                 }
@@ -115,13 +115,13 @@ namespace Oxide.Plugins
             }
 
             void AllocateRegisters() {
-                var names = Enum.GetNames(typeof(BetterCPU.Reg));
+                var names = Enum.GetNames(typeof(VirtualCPU.Register));
 
                 for(int i = 0; i < names.Length; i++) {
-                    programData.Add(BetterCPU.Word.Create(0));
+                    programData.Add(VirtualCPU.Word.Create(0));
 
                     symbols.Add(names[i].ToLowerInvariant(), new Symbol {
-                        word = BetterCPU.Word.Create(i),
+                        word = VirtualCPU.Word.Create(i),
                         type = Symbol.Type.REGISTER
                     });
                 }
@@ -140,7 +140,7 @@ namespace Oxide.Plugins
                             return false;
                         } else {
                             symbols.Add(line[0].stringValue, new Symbol {
-                                word = BetterCPU.Word.Create(numInstructions),
+                                word = VirtualCPU.Word.Create(numInstructions),
                                 type = Symbol.Type.ADDRESS
                             });
                         }
@@ -173,17 +173,45 @@ namespace Oxide.Plugins
                                     programData.Add(line[2].word);
 
                                     symbols.Add(line[1].stringValue, new Symbol {
-                                        word = BetterCPU.Word.Create(programData.Count - 1),
+                                        word = VirtualCPU.Word.Create(programData.Count - 1),
                                         type = Symbol.Type.ADDRESS
                                     });
                                 }
                             }
+                        } else if(line[0].stringValue == "isr") {
+                            if(line.Length != 3 || line[1].type != Token.Type.IDENTIFIER ||line[2].type != Token.Type.IDENTIFIER) {
+                                errors.Add($"invalid directive");
+                                return false;
+                            }
+
+                            Symbol labelAddr0;
+                            Symbol labelAddr1;
+
+                            if(!symbols.TryGetValue(line[1].stringValue, out labelAddr0)) {
+                                errors.Add($"invalid isr directive, no identifier \"{line[1].stringValue}\"");
+                                return false;
+                            } else if(labelAddr0.type != Symbol.Type.ADDRESS) {
+                                errors.Add($"invalid isr directive, identifier \"{line[1].stringValue}\" is not an address");
+                                return false;
+                            }
+
+                            if(!symbols.TryGetValue(line[2].stringValue, out labelAddr1)) {
+                                errors.Add($"invalid isr directive, no identifier \"{line[2].stringValue}\"");
+                                return false;
+                            } else if(labelAddr1.type != Symbol.Type.ADDRESS) {
+                                errors.Add($"invalid isr directive, identifier \"{line[2].stringValue}\" is not an address");
+                                return false;
+                            }
+
+                            var inst = instructions[labelAddr0.word.Int + 1];
+                            inst.word.Int = labelAddr1.word.Int;
+                            instructions[labelAddr0.word.Int + 1] = inst;
                         } else {
-                            errors.Add($"unknown directive");
+                            errors.Add($"unknown directive \"{line[0].stringValue}\"");
                             return false;
                         }
                     } else if(line[0].type == Token.Type.INSTRUCTION) {
-                        BetterCPU.Opcode opcode;
+                        VirtualCPU.Opcode opcode;
 
                         if(!TryStringToOpcode(line[0].stringValue, out opcode)) {
                             errors.Add($"unknown opcode \"{line[0].stringValue}\"");
@@ -193,7 +221,7 @@ namespace Oxide.Plugins
                             return false;
                         }
 
-                        instructions.Add(BetterCPU.Instruction.Create(opcode));
+                        instructions.Add(VirtualCPU.Instruction.Create(opcode));
                         int instIndex = instructions.Count - 1;
 
                         for(int j = 1; j < line.Length; j++) {
@@ -211,9 +239,9 @@ namespace Oxide.Plugins
                                     instructions[instIndex] = instructions[instIndex].SetArgIsRegister(argNum, true);
                                 }
 
-                                instructions.Add(BetterCPU.Instruction.Create(symbol.word));
+                                instructions.Add(VirtualCPU.Instruction.Create(symbol.word));
                             } else if(line[j].type == Token.Type.INTEGER || line[j].type == Token.Type.FLOAT) {
-                                instructions.Add(BetterCPU.Instruction.Create(line[j].word));
+                                instructions.Add(VirtualCPU.Instruction.Create(line[j].word));
                             } else {
                                 errors.Add($"invalid instruction argument \"{line[j].stringValue}\"");
                                 return false;
@@ -300,13 +328,32 @@ namespace Oxide.Plugins
             }
         }
 
-        class BetterCPU {
+        class VirtualCPU {
             Word[] memory = null;
             Instruction[] instructions = null;
             Word cmp0 = Word.Create(0);
             Word cmp1 = Word.Create(0);
             Word flags = Word.Create((uint)Flags.INTERRUPTS_ENABLED);
+            Queue<int> pendingInterrupts = new Queue<int>();
+            static int maxPendingInterrupts = 8;
             public IPeripheral peripheral = null;
+
+            int pic = 0;
+            int _sp = 0;
+            int sp {
+                get { return _sp; }
+                set { _sp = value; memory[(int)Register.SP].Int = value; }
+            }
+
+            void Reset() {
+                memory = null;
+                instructions = null;
+                cmp0 = Word.Create(0);
+                cmp1 = Word.Create(0);
+                flags = Word.Create((uint)Flags.INTERRUPTS_ENABLED);
+                pendingInterrupts.Clear();
+                peripheral = null;
+            }
 
             public interface IPeripheral {
                 Word In(Word addr);
@@ -317,9 +364,6 @@ namespace Oxide.Plugins
             enum Flags : uint {
                 INTERRUPTS_ENABLED = 1 << 0
             }
-
-            int pic = 0;
-            int sp = 0;
 
             [StructLayout(LayoutKind.Explicit)]
             public struct Word {
@@ -382,9 +426,10 @@ namespace Oxide.Plugins
                 }
             }
 
-            public enum Reg {
+            public enum Register {
                 R0, R1, R2,  R3,  R4,  R5,  R6,  R7,
                 R8, R9, R10, R11, R12, R13, R14, R15,
+                SP
             }
 
             public enum Opcode : byte {
@@ -430,6 +475,8 @@ namespace Oxide.Plugins
             }
 
             public void LoadProgram(Instruction[] instructions, Word[] memory, int bsp, int pic = 0) {
+                Reset();
+
                 this.instructions = new Instruction[instructions.Length];
                 instructions.CopyTo(this.instructions, 0);
                 this.memory = new Word[memory.Length];
@@ -438,13 +485,13 @@ namespace Oxide.Plugins
                 this.sp = bsp;
             }
 
-            public void Interrupt(int addr) {
-                if(sp < memory.Length) {
-                    memory[sp].Int = pic;
+            public bool Interrupt(int addr) {
+                if(pendingInterrupts.Count >= maxPendingInterrupts) {
+                    return false;
                 }
 
-                sp++;
-                pic = addr;
+                pendingInterrupts.Enqueue(addr);
+                return true;
             }
 
             public bool Cycle(out Status status) {
@@ -457,6 +504,24 @@ namespace Oxide.Plugins
                 if(sp < 0 || sp >= memory.Length) {
                     status = Status.SEGFAULT;
                     return false;
+                }
+
+                if((flags.Int & (int)Flags.INTERRUPTS_ENABLED) != 0 && pendingInterrupts.Count != 0) {
+                    int addr = pendingInterrupts.Dequeue();
+
+                    memory[sp++].Int = pic;
+                    pic = addr;
+
+                    if(pic < 0 || pic >= instructions.Length) {
+                        Print($"pic: {pic}");
+                        status = Status.OUT_OF_INSTRUCTIONS;
+                        return false;
+                    }
+
+                    if(sp < 0 || sp >= memory.Length) {
+                        status = Status.SEGFAULT;
+                        return false;
+                    }
                 }
 
                 Instruction inst = instructions[pic++];
@@ -665,21 +730,21 @@ namespace Oxide.Plugins
             }
         }
 
-        class Peripheral : BetterCPU.IPeripheral {
-            public BetterCPU.Word In(BetterCPU.Word addr) {
+        class Peripheral : VirtualCPU.IPeripheral {
+            public VirtualCPU.Word In(VirtualCPU.Word addr) {
                 switch(addr.Int) {
                     case 0:
-                        return BetterCPU.Word.Create(33);
+                        return VirtualCPU.Word.Create(33);
                     case 1:
-                        return BetterCPU.Word.Create(42);
+                        return VirtualCPU.Word.Create(42);
                     case 2:
-                        return BetterCPU.Word.Create(3.14159265f);
+                        return VirtualCPU.Word.Create(3.14159265f);
                 }
 
-                return BetterCPU.Word.Create(0);
+                return VirtualCPU.Word.Create(0);
             }
 
-            public void Out(BetterCPU.Word addr, BetterCPU.Word value) {
+            public void Out(VirtualCPU.Word addr, VirtualCPU.Word value) {
                 switch(addr.Int) {
                     case 0:
                         Print($"Out({addr.Int}, {value.Int})");
@@ -716,13 +781,48 @@ namespace Oxide.Plugins
             manager = go.AddComponent<McuManager>();
             manager.Init(this);
 
-            bool success = betterCompiler.Compile(@"
+            bool success = virtualCPUAssembler.Compile(@"
+            # this would be code included automatically that sets
+            # up interrupt service routines and named constants etc
+
+            # named peripheral port addresses
+            .const print_int 0
+            .const print_uint 1
+            .const print_float 2
+
+            # jmp past the isr definitions into user code
+            # alternatively the pic parameter to LoadProgram() can be set to bypass this
+            jmp user_code
+            
+            # the first isr would be at addr 0x1 since the jmp above is at 0
+            isr_0_name:
+                jmp isr_0_stub
+            isr_1_name:
+                jmp isr_1_stub
+
+            isr_0_stub:
+                ret
+            isr_1_stub:
+                ret
+
+            user_code:
+            
+            # this is where the actual user code would start
             .word x 42
             .word y 0
 
-            mov r0 0
+            cli
+            sei
             jmp main
 
+            .isr isr_0_name my_isr_handler
+            my_isr_handler:
+                out print_float 2.54
+                out print_int sp
+                ret
+
+            # basic tests to make sure things are working
+            # the jnes will cause a crash if things are not as expected
             main:
                 cmpi [x] 42
                 jne 1000
@@ -758,51 +858,37 @@ namespace Oxide.Plugins
                 cmpi r0 7
                 jne 1007
 
-                #mov [1000000] 0
-
-                #mov x 1000000
-                #mov r0 [x]
-                #mov [r0] 0
-
-                #mov r0 1000000
-                #mov [r0] 0
-
-                in r0 0
-                out 0 r0
-
-                in r0 1
-                out 1 r0
-
-                in r0 2
-                out 2 r0
-
                 jmp main
             ", 1024);
 
             if(!success) {
-                foreach(string error in betterCompiler.errors) {
+                foreach(string error in virtualCPUAssembler.errors) {
                     Print($"error: {error}");
                 }
 
                 return;
             }
 
-            betterCPU.LoadProgram(betterCompiler.instructions.ToArray(), betterCompiler.memory, betterCompiler.programData.Count);
+            virtualCPU.LoadProgram(virtualCPUAssembler.instructions.ToArray(), virtualCPUAssembler.memory, virtualCPUAssembler.programData.Count);
             int numInstructions = 1000;
 
-            betterCPU.peripheral = new Peripheral();
+            virtualCPU.peripheral = new Peripheral();
 
-            BetterCPU.Status st;
-            if(!betterCPU.Cycle(out st)) {
+            VirtualCPU.Status st;
+            if(!virtualCPU.Cycle(out st)) {
                 Print($"cpu error: {st.ToString()}");
             }
 
             float startTime = Time.realtimeSinceStartup;
 
             for(int i = 0; i < numInstructions; i++) {
-                BetterCPU.Status status;
+                VirtualCPU.Status status;
 
-                if(!betterCPU.Cycle(out status)) {
+                if(i % 100 == 0) {
+                    virtualCPU.Interrupt(1);
+                }
+
+                if(!virtualCPU.Cycle(out status)) {
                     Print($"cpu error: {status.ToString()}");
                     break;
                 }
