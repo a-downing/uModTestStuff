@@ -13,10 +13,10 @@ using System.Runtime.InteropServices;
 
 namespace Oxide.Plugins
 {
-    [Info("Microcontroller", "Andrew", "0.0.0")]
-    public class Microcontroller : RustPlugin {
+    [Info("Microcontroller-orig", "Andrew", "0.0.0")]
+    public class Microcontroller_orig : RustPlugin {
         static ConfigData config;
-        static Microcontroller plugin = null;
+        static Microcontroller_orig plugin = null;
         static Compiler compiler = null;
         string shortName = "electrical.random.switch.deployed";
         string prefab = "assets/prefabs/deployable/playerioents/gates/randswitch/electrical.random.switch.deployed.prefab";
@@ -262,7 +262,6 @@ namespace Oxide.Plugins
                     var line = codeLines[i];
                     tokens.Add(new Token[line.Length]);
                     var tokenLine = tokens[i];
-                    //Print($"{String.Join(", ", line)}");
 
                     for(int j = 0; j < line.Length; j++) {
                         string arg = line[j];
@@ -496,7 +495,6 @@ namespace Oxide.Plugins
 
             public bool Cycle(out Status status) {
                 if(pic < 0 || pic >= instructions.Length) {
-                    Print($"pic: {pic}");
                     status = Status.OUT_OF_INSTRUCTIONS;
                     return false;
                 }
@@ -513,7 +511,6 @@ namespace Oxide.Plugins
                     pic = addr;
 
                     if(pic < 0 || pic >= instructions.Length) {
-                        Print($"pic: {pic}");
                         status = Status.OUT_OF_INSTRUCTIONS;
                         return false;
                     }
@@ -1050,9 +1047,9 @@ namespace Oxide.Plugins
 
         class McuManager : MonoBehaviour {
             public const string Guid = "d7106397-4efc-44c6-b541-1312fb455cde";
-            public Microcontroller plugin = null;
+            public Microcontroller_orig plugin = null;
 
-            public void Init(Microcontroller plugin) {
+            public void Init(Microcontroller_orig plugin) {
                 this.plugin = plugin;
                 float period = 1.0f / config.CPUFreq;
                 InvokeRepeating(nameof(CycleCPUs), period, period);
