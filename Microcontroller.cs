@@ -306,6 +306,12 @@ namespace Oxide.Plugins
             Word cmp0 = Word.Create(0);
             Word cmp1 = Word.Create(0);
             Word flags = Word.Create((uint)Flags.INTERRUPTS_ENABLED);
+            public IPeripheral peripheral = null;
+
+            public interface IPeripheral {
+                Word In(Word addr);
+                void Out(Word addr, Word value);
+            }
 
             [Flags]
             enum Flags : uint {
@@ -328,8 +334,12 @@ namespace Oxide.Plugins
                     return new Word{ Int = i };
                 }
 
-                public static Word Create(uint i) {
-                    return new Word{ Uint = i };
+                public static Word Create(uint u) {
+                    return new Word{ Uint = u };
+                }
+
+                public static Word Create(float f) {
+                    return new Word{ Float = f };
                 }
             }
 
@@ -426,6 +436,15 @@ namespace Oxide.Plugins
                 memory.CopyTo(this.memory, 0);
                 this.pic = pic;
                 this.sp = bsp;
+            }
+
+            public void Interrupt(int addr) {
+                if(sp < memory.Length) {
+                    memory[sp].Int = pic;
+                }
+
+                sp++;
+                pic = addr;
             }
 
             public bool Cycle(out Status status) {
@@ -544,15 +563,16 @@ namespace Oxide.Plugins
                     case Opcode.JLE:
                         pic = (cmp0.Int <= cmp1.Int) ? arg0.Int : pic;
                         break;
-                    case Opcode.IN:
-                        break;
-                    case Opcode.OUT:
-                        break;
                     case Opcode.CLI:
                         flags.Uint &= ~(uint)Flags.INTERRUPTS_ENABLED;
                         break;
                     case Opcode.SEI:
                         flags.Uint |= (uint)Flags.INTERRUPTS_ENABLED;
+                        break;
+                    case Opcode.OUT:
+                        if(peripheral != null) {
+                            peripheral.Out(arg0, arg1);
+                        }
                         break;
                     default:
                         handledHere = false;
@@ -625,6 +645,11 @@ namespace Oxide.Plugins
 
                         memory[addr0.Int].Int = arg0.Int % arg1.Int;
                         break;
+                    case Opcode.IN:
+                        if(peripheral != null) {
+                            memory[addr0.Int] = peripheral.In(arg1);
+                        }
+                        break;
                     default:
                         handledHere = false;
                         break;
@@ -637,6 +662,35 @@ namespace Oxide.Plugins
 
                 status = Status.MISSING_INSTRUCTION;
                 return false;
+            }
+        }
+
+        class Peripheral : BetterCPU.IPeripheral {
+            public BetterCPU.Word In(BetterCPU.Word addr) {
+                switch(addr.Int) {
+                    case 0:
+                        return BetterCPU.Word.Create(33);
+                    case 1:
+                        return BetterCPU.Word.Create(42);
+                    case 2:
+                        return BetterCPU.Word.Create(3.14159265f);
+                }
+
+                return BetterCPU.Word.Create(0);
+            }
+
+            public void Out(BetterCPU.Word addr, BetterCPU.Word value) {
+                switch(addr.Int) {
+                    case 0:
+                        Print($"Out({addr.Int}, {value.Int})");
+                        break;
+                    case 1:
+                        Print($"Out({addr.Int}, {value.Uint})");
+                        break;
+                    case 2:
+                        Print($"Out({addr.Int}, {value.Float})");
+                        break;
+                }
             }
         }
 
@@ -713,6 +767,15 @@ namespace Oxide.Plugins
                 #mov r0 1000000
                 #mov [r0] 0
 
+                in r0 0
+                out 0 r0
+
+                in r0 1
+                out 1 r0
+
+                in r0 2
+                out 2 r0
+
                 jmp main
             ", 1024);
 
@@ -726,6 +789,8 @@ namespace Oxide.Plugins
 
             betterCPU.LoadProgram(betterCompiler.instructions.ToArray(), betterCompiler.memory, betterCompiler.programData.Count);
             int numInstructions = 1000;
+
+            betterCPU.peripheral = new Peripheral();
 
             BetterCPU.Status st;
             if(!betterCPU.Cycle(out st)) {
