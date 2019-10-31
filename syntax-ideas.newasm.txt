@@ -1,14 +1,14 @@
 .const input_port 1
 .const output_port 2
 
-.word last_input
-.word input_value
+.word last_input 0
+.word input_value 0
 
-mov last_input 0
-mov input_value 0
-jmp main
+mov r8 r8
+jmp loop
 
 isr_input:
+    cli
     in input_value input_port
     push input_value
     call do_output
@@ -28,4 +28,19 @@ main:
     call do_output
 
 loop:
-        jmp loop
+    mov r0 12345
+    mov r1 54321
+    mov r2 r1
+    mul r2 r0
+    mov r3 123
+    mov r2 r0
+    div r2 r3
+    add r0 r1
+    
+    mov r0 49
+    mov r1 7
+    div r0 r1
+    cmpi r0 r1
+    #je 1000000
+
+    jmp loop

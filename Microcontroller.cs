@@ -30,22 +30,285 @@ namespace Oxide.Plugins
         
         //testing
         BetterCPU betterCPU = new BetterCPU();
+        BetterCompiler betterCompiler = new BetterCompiler();
+
+        class BetterCompiler {
+            List<string[]> codeLines = new List<string[]>();
+            List<Token[]> tokens = new List<Token[]>();
+            Dictionary<string, Symbol> symbols = new Dictionary<string, Symbol>();
+            public List<string> errors = new List<string>();
+            public List<BetterCPU.Word> programData = new List<BetterCPU.Word>();
+            public List<BetterCPU.Instruction> instructions = new List<BetterCPU.Instruction>();
+            public BetterCPU.Word[] memory = null;
+
+            struct Symbol {
+                public BetterCPU.Word word;
+                public Type type;
+
+                public enum Type {
+                    ADDRESS,
+                    REGISTER
+                }
+            }
+
+            struct Token {
+                public enum Type {
+                    NONE,
+                    DIRECTIVE,
+                    LABEL,
+                    INSTRUCTION,
+                    IDENTIFIER,
+                    INTEGER,
+                    FLOAT
+                }
+
+                public bool indirect;
+                public Type type;
+                public string stringValue;
+                public int intValue;
+                public float floatValue;
+                public BetterCPU.Word word;
+
+                public override string ToString() {
+                    return $"{{{type.ToString()}:{stringValue} indirect:{indirect} intValue:{intValue} floatValue:{floatValue}}}";
+                }
+            }
+
+            public bool Compile(string code, int memorySize) {
+                if(!Preprocess(code)) {
+                    return false;
+                }
+
+                if(!Tokenize()) {
+                    return false;
+                }
+
+                if(!Parse()) {
+                    return false;
+                }
+
+                if(memorySize < programData.Count) {
+                    errors.Add($"program data is larger than desired memory size ({memorySize} < {programData.Count})");
+                    return false;
+                }
+
+                memory = new BetterCPU.Word[memorySize];
+                programData.CopyTo(memory, 0);
+
+                return true;
+            }
+
+            bool TryStringToOpcode(string str, out BetterCPU.Opcode opcode) {
+                var names = Enum.GetNames(typeof(BetterCPU.Opcode));
+                var values = Enum.GetValues(typeof(BetterCPU.Opcode));
+                str = str.ToUpperInvariant();
+                
+                for(int i = 0; i < names.Length; i++) {
+                    if(names[i] == str) {
+                        opcode = (BetterCPU.Opcode)values.GetValue(i);
+                        return true;
+                    }
+                }
+
+                opcode = 0;
+                return false;
+            }
+
+            void AllocateRegisters() {
+                var names = Enum.GetNames(typeof(BetterCPU.Reg));
+
+                for(int i = 0; i < names.Length; i++) {
+                    programData.Add(BetterCPU.Word.Create(0));
+
+                    symbols.Add(names[i].ToLowerInvariant(), new Symbol {
+                        word = BetterCPU.Word.Create(i),
+                        type = Symbol.Type.REGISTER
+                    });
+                }
+            }
+
+            bool Parse() {
+                AllocateRegisters();
+                int numInstructions = 0;
+
+                for(int i = 0; i < tokens.Count; i++) {
+                    Token[] line = tokens[i];
+
+                    if(line[0].type == Token.Type.LABEL) {
+                        if(symbols.ContainsKey(line[0].stringValue)) {
+                            errors.Add($"redefinition of identifier \"{line[0].stringValue}\"");
+                            return false;
+                        } else {
+                            symbols.Add(line[0].stringValue, new Symbol {
+                                word = BetterCPU.Word.Create(numInstructions),
+                                type = Symbol.Type.ADDRESS
+                            });
+                        }
+                    } else if(line[0].type == Token.Type.INSTRUCTION) {
+                        numInstructions += line.Length;
+                    }
+                }
+
+                for(int i = 0; i < tokens.Count; i++) {
+                    Token[] line = tokens[i];
+                    //Print($"{String.Join(", ", line)}");
+
+                    if(line[0].type == Token.Type.DIRECTIVE) {
+                        if(line[0].stringValue == "const" || line[0].stringValue == "word") {
+                            if(line.Length != 3 || line[1].type != Token.Type.IDENTIFIER || (line[2].type != Token.Type.INTEGER && line[2].type != Token.Type.FLOAT)) {
+                                errors.Add($"invalid directive");
+                                return false;
+                            }
+
+                            if(symbols.ContainsKey(line[1].stringValue)) {
+                                errors.Add($"redefinition of identifier \"{line[1].stringValue}\"");
+                                return false;
+                            } else {
+                                if(line[0].stringValue == "const") {
+                                    symbols.Add(line[1].stringValue, new Symbol {
+                                        word = line[2].word,
+                                        type = Symbol.Type.ADDRESS
+                                    });
+                                } else {
+                                    programData.Add(line[2].word);
+
+                                    symbols.Add(line[1].stringValue, new Symbol {
+                                        word = BetterCPU.Word.Create(programData.Count - 1),
+                                        type = Symbol.Type.ADDRESS
+                                    });
+                                }
+                            }
+                        } else {
+                            errors.Add($"unknown directive");
+                            return false;
+                        }
+                    } else if(line[0].type == Token.Type.INSTRUCTION) {
+                        BetterCPU.Opcode opcode;
+
+                        if(!TryStringToOpcode(line[0].stringValue, out opcode)) {
+                            errors.Add($"unknown opcode \"{line[0].stringValue}\"");
+                            return false;
+                        } else if(line.Length > 3) {
+                            errors.Add($"no instructions take more than two arguments");
+                            return false;
+                        }
+
+                        instructions.Add(BetterCPU.Instruction.Create(opcode));
+                        int instIndex = instructions.Count - 1;
+
+                        for(int j = 1; j < line.Length; j++) {
+                            int argNum = j - 1;
+
+                            if(line[j].type == Token.Type.IDENTIFIER) {
+                                Symbol symbol;
+
+                                if(!symbols.TryGetValue(line[j].stringValue, out symbol)) {
+                                    errors.Add($"unknown identifier \"{line[j].stringValue}\"");
+                                    return false;
+                                }
+
+                                if(symbol.type == Symbol.Type.REGISTER) {
+                                    instructions[instIndex] = instructions[instIndex].SetArgType(argNum, 1);
+                                }
+
+                                instructions.Add(BetterCPU.Instruction.Create(symbol.word));
+                            } else if(line[j].type == Token.Type.INTEGER || line[j].type == Token.Type.FLOAT) {
+                                instructions.Add(BetterCPU.Instruction.Create(line[j].word));
+                            } else {
+                                errors.Add($"invalid instruction argument \"{line[j].stringValue}\"");
+                                return false;
+                            }
+
+                            instructions[instIndex] = instructions[instIndex].SetArgFlag(argNum, line[j].indirect ? 2 : 1);
+                        }
+                    }
+                }
+
+                return true;
+            }
+
+            bool Tokenize() {
+                for(int i = 0; i < codeLines.Count; i++) {
+                    var line = codeLines[i];
+                    tokens.Add(new Token[line.Length]);
+                    var tokenLine = tokens[i];
+                    //Print($"{String.Join(", ", line)}");
+
+                    for(int j = 0; j < line.Length; j++) {
+                        string arg = line[j];
+                        tokenLine[j].indirect = false;
+                        tokenLine[j].type = Token.Type.NONE;
+                        Match indirectMatch = Regex.Match(arg, @"^\[([^\[]+)\]$");
+                        
+                        if(indirectMatch.Success) {
+                            tokenLine[j].indirect = true;
+                            arg = indirectMatch.Groups[1].ToString();
+                        }
+
+                        Match directiveMatch = Regex.Match(arg, @"^\.([a-zA-Z_][a-zA-Z0-9_]*)$");
+                        Match labelMatch = Regex.Match(arg, @"^([a-zA-Z_][a-zA-Z0-9_]*):$");
+                        Match identifierMatch = Regex.Match(arg, @"^[a-zA-Z_][a-zA-Z0-9_]*$");
+                        Match integerMatch = Regex.Match(arg, @"^[+-]?[0-9]+$");
+                        Match floatMatch = Regex.Match(arg, @"^[+-]?[0-9]?[\.][0-9]*$");
+
+                        if(directiveMatch.Success) {
+                            tokenLine[j].type = Token.Type.DIRECTIVE;
+                            tokenLine[j].stringValue = directiveMatch.Groups[1].ToString();
+                        } else if(labelMatch.Success) {
+                            tokenLine[j].type = Token.Type.LABEL;
+                            tokenLine[j].stringValue = labelMatch.Groups[1].ToString();
+                        } else if(identifierMatch.Success) {
+                            tokenLine[j].type = (j == 0) ? Token.Type.INSTRUCTION : Token.Type.IDENTIFIER;
+                            tokenLine[j].stringValue = identifierMatch.Groups[0].ToString();
+                        } else if(integerMatch.Success) {
+                            tokenLine[j].type = Token.Type.INTEGER;
+                            tokenLine[j].stringValue = integerMatch.Groups[0].ToString();
+                            int.TryParse(tokenLine[j].stringValue, out tokenLine[j].word.Int);
+                        } else if(floatMatch.Success && floatMatch.Groups[0].ToString() != ".") {
+                            tokenLine[j].type = Token.Type.FLOAT;
+                            tokenLine[j].stringValue = floatMatch.Groups[0].ToString();
+                            float.TryParse(tokenLine[j].stringValue, out tokenLine[j].word.Float);
+                        }
+                    }
+                }
+
+                return true;
+            }
+
+            bool Preprocess(string code) {
+                var lines = code.Split(new[] {"\r\n", "\r", "\n", ";"}, StringSplitOptions.RemoveEmptyEntries);
+                
+                for(int i = 0; i < lines.Length; i++) {
+                    lines[i] = code = Regex.Replace(lines[i].Trim() ,@"\s+"," ");
+
+                    if(lines[i].Length > 0) {
+                        if(lines[i][0] == '#') {
+                            continue;
+                        }
+
+                        var args = lines[i].Split(' ');
+
+                        if(args.Length > 0) {
+                            codeLines.Add(args);
+                        }
+                    }
+                }
+
+                return true;
+            }
+        }
 
         class BetterCPU {
             Word[] memory = null;
             Instruction[] instructions = null;
             Word cmp0 = Word.Create(0);
             Word cmp1 = Word.Create(0);
+            Word flags = Word.Create((uint)Flags.INTERRUPTS_ENABLED);
 
-            /*int pic {
-                get { return memory[(int)Reg.PIC].Int; }
-                set { memory[(int)Reg.PIC].Int = value; }
+            [Flags]
+            enum Flags : uint {
+                INTERRUPTS_ENABLED = 1 << 0
             }
-
-            int bsp {
-                get { return memory[(int)Reg.BSP].Int; }
-                set { memory[(int)Reg.BSP].Int = value; }
-            }*/
 
             int pic = 0;
             int sp = 0;
@@ -62,6 +325,10 @@ namespace Oxide.Plugins
                 public static Word Create(int i) {
                     return new Word{ Int = i };
                 }
+
+                public static Word Create(uint i) {
+                    return new Word{ Uint = i };
+                }
             }
 
             [StructLayout(LayoutKind.Explicit)]
@@ -71,27 +338,42 @@ namespace Oxide.Plugins
                 [FieldOffset(0)]
                 public Opcode op;
                 [FieldOffset(1)]
-                public byte opFlags;
+                public byte argTypes;
                 [FieldOffset(2)]
                 public byte argFlags;
+
+                public Instruction SetArgFlag(int argNum, int flag) {
+                    int shift = 2 * argNum;
+                    int mask = ~(3 << shift);
+                    argFlags = (byte)((argFlags & mask) | (flag << shift));
+                    return this;
+                }
+
+                public Instruction SetArgType(int argNum, int type) {
+                    int shift = 2 * argNum;
+                    int mask = ~(3 << shift);
+                    argFlags = (byte)((argFlags & mask) | (type << shift));
+                    return this;
+                }
+
+                public static Instruction Create(Word word) {
+                    return new Instruction{ word = word };
+                }
 
                 public static Instruction Create(int i) {
                     return new Instruction{ word = new Word{ Int = i } };
                 }
 
-                public static Instruction Create(Opcode op, byte argFlags = 0) {
-                    return new Instruction{ op = op, argFlags = argFlags };
-                }
-
-                public static Instruction Create(Opcode op, byte argFlags1 = 0, byte argFlags2 = 0) {
-                    return new Instruction{ op = op, argFlags = (byte)(argFlags1 | (argFlags2 << 2)) };
+                public static Instruction Create(Opcode op) {
+                    return new Instruction{ op = op, argTypes = 0, argFlags = 0 };
                 }
             }
 
-            /*public enum Reg {
-                PIC = 0,
-                BSP
-            }*/
+            public enum Reg {
+                NULL = 0,
+                R0, R1, R2,  R3,  R4,  R5,  R6,  R7,
+                R8, R9, R10, R11, R12, R13, R14, R15,
+            }
 
             public enum Opcode : byte {
                 NOP = 0,
@@ -120,6 +402,10 @@ namespace Oxide.Plugins
                 MUL,
                 DIV,
                 MOD,
+                IN,
+                OUT,
+                CLI,
+                SEI
             }
 
             public enum Status {
@@ -151,42 +437,50 @@ namespace Oxide.Plugins
                     return false;
                 }
 
+                Print($"pic: {pic}");
+
                 Instruction inst = instructions[pic++];
                 Word arg0 = Word.Create(0), arg1 = arg0;
 
                 switch(inst.argFlags) {
                     case (1 << 0):
                         arg0 = instructions[pic++].word;
+                        Print($"{inst.op.ToString()} {arg0.Int}");
                         break;
                     case (2 << 0):
                         arg0 = instructions[pic++].word;
                         arg0 = memory[arg0.Int];
+                        Print($"{inst.op.ToString()} {arg0.Int}");
                         break;
                     case (1 << 0) | (1 << 2):
                         arg0 = instructions[pic++].word;
                         arg1 = instructions[pic++].word;
+                        Print($"{inst.op.ToString()} {arg0.Int} {arg1.Int}");
                         break;
                     case (2 << 0) | (1 << 2):
                         arg0 = instructions[pic++].word;
                         arg0 = memory[arg0.Int];
                         arg1 = instructions[pic++].word;
+                        Print($"{inst.op.ToString()} {arg0.Int} {arg1.Int}");
                         break;
                     case (1 << 0) | (2 << 2):
                         arg0 = instructions[pic++].word;
                         arg1 = instructions[pic++].word;
                         arg1 = memory[arg1.Int];
+                        Print($"{inst.op.ToString()} {arg0.Int} {arg1.Int}");
                         break;
                     case (2 << 0) | (2 << 2):
                         arg0 = instructions[pic++].word;
                         arg0 = memory[arg0.Int];
                         arg1 = instructions[pic++].word;
                         arg1 = memory[arg1.Int];
+                        Print($"{inst.op.ToString()} {arg0.Int} {arg1.Int}");
                         break;
                 }
 
                 switch(inst.op) {
                     case Opcode.MOV:
-                        memory[arg0.Int] = memory[arg1.Int];
+                        memory[arg0.Int] = arg1;
                         break;
                     case Opcode.JMP:
                         pic = arg0.Int;
@@ -272,6 +566,16 @@ namespace Oxide.Plugins
 
                         memory[arg0.Int].Int = memory[arg0.Int].Int % arg1.Int;
                         break;
+                    case Opcode.IN:
+                        break;
+                    case Opcode.OUT:
+                        break;
+                    case Opcode.CLI:
+                        flags.Uint &= ~(uint)Flags.INTERRUPTS_ENABLED;
+                        break;
+                    case Opcode.SEI:
+                        flags.Uint |= (uint)Flags.INTERRUPTS_ENABLED;
+                        break;
                     default:
                         status = Status.MISSING_INSTRUCTION;
                         return false;
@@ -304,37 +608,72 @@ namespace Oxide.Plugins
             manager = go.AddComponent<McuManager>();
             manager.Init(this);
 
-            BetterCPU.Word[] data = new BetterCPU.Word[] {
-                BetterCPU.Word.Create(0),
-                BetterCPU.Word.Create(0),
-                BetterCPU.Word.Create(0),
-                BetterCPU.Word.Create(33),
-                BetterCPU.Word.Create(42),
-                BetterCPU.Word.Create(8),
-                BetterCPU.Word.Create(1),
-                BetterCPU.Word.Create(2),
-            };
+            bool success = betterCompiler.Compile(@"
+            .const input_port 1
+            .const output_port 2
 
-            BetterCPU.Word[] memory = new BetterCPU.Word[1024];
-            data.CopyTo(memory, 0);
+            .word last_input 0
+            .word input_value 0
 
-            BetterCPU.Instruction[] instructions = new BetterCPU.Instruction[] {
-                BetterCPU.Instruction.Create(BetterCPU.Opcode.MOV, 1, 1), BetterCPU.Instruction.Create(1), BetterCPU.Instruction.Create(2),
-                BetterCPU.Instruction.Create(BetterCPU.Opcode.MOV, 2, 2), BetterCPU.Instruction.Create(4), BetterCPU.Instruction.Create(5),
-                BetterCPU.Instruction.Create(BetterCPU.Opcode.MOV, 1, 2), BetterCPU.Instruction.Create(1), BetterCPU.Instruction.Create(5),
-                BetterCPU.Instruction.Create(BetterCPU.Opcode.MOV, 2, 1), BetterCPU.Instruction.Create(4), BetterCPU.Instruction.Create(2),
-                BetterCPU.Instruction.Create(BetterCPU.Opcode.PUSH, 1), BetterCPU.Instruction.Create(1),
-                BetterCPU.Instruction.Create(BetterCPU.Opcode.POP, 1), BetterCPU.Instruction.Create(2),
-                BetterCPU.Instruction.Create(BetterCPU.Opcode.SHRS, 1, 1), BetterCPU.Instruction.Create(2), BetterCPU.Instruction.Create(3),
-                BetterCPU.Instruction.Create(BetterCPU.Opcode.SHL, 1, 1), BetterCPU.Instruction.Create(2), BetterCPU.Instruction.Create(3),
-                BetterCPU.Instruction.Create(BetterCPU.Opcode.CMPI, 1, 1), BetterCPU.Instruction.Create(42), BetterCPU.Instruction.Create(42),
-                BetterCPU.Instruction.Create(BetterCPU.Opcode.JE, 1), BetterCPU.Instruction.Create(0),
-                BetterCPU.Instruction.Create(BetterCPU.Opcode.JMP, 1), BetterCPU.Instruction.Create(4342342)
-            };
+            mov r8 [r8]
+            jmp loop
 
-            betterCPU.LoadProgram(instructions, memory, data.Length);
+            isr_input:
+                cli
+                in input_value [input_port]
+                push [input_value]
+                call do_output
+                mov last_input [input_value]
+                sei
+                ret
+
+            do_output:
+                pop r8
+                not r8
+                out output_port [r8]
+                ret
+
+            main:
+                in input_value input_port
+                push [input_value]
+                call do_output
+
+            loop:
+                mov r0 12345
+                mov r1 54321
+                mov r2 [r1]
+                mul r2 [r0]
+                mov r3 123
+                mov r2 [r0]
+                div r2 [r3]
+                add r0 [r1]
+                
+                mov r0 49
+                mov r1 7
+                div r0 [r1]
+                cmpi [r0] [r1]
+                jne 1000000
+
+                jmp loop
+            ", 1024);
+
+            if(!success) {
+                foreach(string error in betterCompiler.errors) {
+                    Print($"error: {error}");
+                }
+
+                return;
+            }
+
+            betterCPU.LoadProgram(betterCompiler.instructions.ToArray(), betterCompiler.memory, betterCompiler.programData.Count);
+            int numInstructions = 1000;
+
+            BetterCPU.Status st;
+            if(!betterCPU.Cycle(out st)) {
+                Print($"cpu error: {st.ToString()}");
+            }
+
             float startTime = Time.realtimeSinceStartup;
-            int numInstructions = 10000000;
 
             for(int i = 0; i < numInstructions; i++) {
                 BetterCPU.Status status;
