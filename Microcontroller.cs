@@ -208,7 +208,7 @@ namespace Oxide.Plugins
                                 }
 
                                 if(symbol.type == Symbol.Type.REGISTER) {
-                                    instructions[instIndex] = instructions[instIndex].SetArgType(argNum, 1);
+                                    instructions[instIndex] = instructions[instIndex].SetArgIsRegister(argNum, true);
                                 }
 
                                 instructions.Add(BetterCPU.Instruction.Create(symbol.word));
@@ -219,8 +219,10 @@ namespace Oxide.Plugins
                                 return false;
                             }
 
-                            instructions[instIndex] = instructions[instIndex].SetArgFlag(argNum, line[j].indirect ? 2 : 1);
+                            instructions[instIndex] = instructions[instIndex].SetArgIsIndirect(argNum, line[j].indirect);
                         }
+
+                        instructions[instIndex] = instructions[instIndex].SetNumArgs(line.Length - 1);
                     }
                 }
 
@@ -337,22 +339,23 @@ namespace Oxide.Plugins
                 public Word word;
                 [FieldOffset(0)]
                 public Opcode op;
-                [FieldOffset(1)]
-                public byte argTypes;
                 [FieldOffset(2)]
-                public byte argFlags;
+                public ushort argFlags;
 
-                public Instruction SetArgFlag(int argNum, int flag) {
-                    int shift = 2 * argNum;
-                    int mask = ~(3 << shift);
-                    argFlags = (byte)((argFlags & mask) | (flag << shift));
+                public Instruction SetNumArgs(int num) {
+                    argFlags = (ushort)((argFlags & ~0xF) | num);
                     return this;
                 }
 
-                public Instruction SetArgType(int argNum, int type) {
-                    int shift = 2 * argNum;
-                    int mask = ~(3 << shift);
-                    argFlags = (byte)((argFlags & mask) | (type << shift));
+                public Instruction SetArgIsRegister(int argNum, bool value) {
+                    int shift = 4 + argNum;
+                    argFlags = (value) ? (ushort)(argFlags | 1 << shift) : (ushort)(argFlags & ~(1 << shift));
+                    return this;
+                }
+
+                public Instruction SetArgIsIndirect(int argNum, bool value) {
+                    int shift = 8 + argNum;
+                    argFlags = (value) ? (ushort)(argFlags | 1 << shift) : (ushort)(argFlags & ~(1 << shift));
                     return this;
                 }
 
@@ -365,12 +368,11 @@ namespace Oxide.Plugins
                 }
 
                 public static Instruction Create(Opcode op) {
-                    return new Instruction{ op = op, argTypes = 0, argFlags = 0 };
+                    return new Instruction{ op = op, argFlags = 0 };
                 }
             }
 
             public enum Reg {
-                NULL = 0,
                 R0, R1, R2,  R3,  R4,  R5,  R6,  R7,
                 R8, R9, R10, R11, R12, R13, R14, R15,
             }
@@ -428,6 +430,7 @@ namespace Oxide.Plugins
 
             public bool Cycle(out Status status) {
                 if(pic < 0 || pic >= instructions.Length) {
+                    Print($"pic: {pic}");
                     status = Status.OUT_OF_INSTRUCTIONS;
                     return false;
                 }
@@ -437,51 +440,75 @@ namespace Oxide.Plugins
                     return false;
                 }
 
-                Print($"pic: {pic}");
-
                 Instruction inst = instructions[pic++];
+                int numArgs = inst.argFlags & 0xF;
+                int argRegFlags = (inst.argFlags & 0xF0) >> 4;
+                int argIndirectFlags = (inst.argFlags & 0xF00) >> 8;
                 Word arg0 = Word.Create(0), arg1 = arg0;
+                Word addr0 = Word.Create(0), addr1 = addr0;
+                bool handledHere;
 
-                switch(inst.argFlags) {
-                    case (1 << 0):
-                        arg0 = instructions[pic++].word;
-                        Print($"{inst.op.ToString()} {arg0.Int}");
-                        break;
-                    case (2 << 0):
-                        arg0 = instructions[pic++].word;
-                        arg0 = memory[arg0.Int];
-                        Print($"{inst.op.ToString()} {arg0.Int}");
-                        break;
-                    case (1 << 0) | (1 << 2):
-                        arg0 = instructions[pic++].word;
-                        arg1 = instructions[pic++].word;
-                        Print($"{inst.op.ToString()} {arg0.Int} {arg1.Int}");
-                        break;
-                    case (2 << 0) | (1 << 2):
-                        arg0 = instructions[pic++].word;
-                        arg0 = memory[arg0.Int];
-                        arg1 = instructions[pic++].word;
-                        Print($"{inst.op.ToString()} {arg0.Int} {arg1.Int}");
-                        break;
-                    case (1 << 0) | (2 << 2):
-                        arg0 = instructions[pic++].word;
-                        arg1 = instructions[pic++].word;
-                        arg1 = memory[arg1.Int];
-                        Print($"{inst.op.ToString()} {arg0.Int} {arg1.Int}");
-                        break;
-                    case (2 << 0) | (2 << 2):
-                        arg0 = instructions[pic++].word;
-                        arg0 = memory[arg0.Int];
-                        arg1 = instructions[pic++].word;
-                        arg1 = memory[arg1.Int];
-                        Print($"{inst.op.ToString()} {arg0.Int} {arg1.Int}");
-                        break;
+                if(numArgs >= 1) {
+                    if(pic < 0 || pic >= instructions.Length) {
+                        status = Status.OUT_OF_INSTRUCTIONS;
+                        return false;
+                    }
+
+                    arg0 = instructions[pic++].word;
                 }
 
+                if(numArgs >= 2) {
+                    if(pic < 0 || pic >= instructions.Length) {
+                        status = Status.OUT_OF_INSTRUCTIONS;
+                        return false;
+                    }
+
+                    arg1 = instructions[pic++].word;
+                }
+
+                if((argIndirectFlags & 1) != 0) {
+                    if(arg0.Int < 0 || arg0.Int >= memory.Length) {
+                        status = Status.SEGFAULT;
+                        return false;
+                    }
+
+                    arg0 = memory[arg0.Int];
+                }
+
+                if((argIndirectFlags & 2) != 0) {
+                    if(arg1.Int < 0 || arg1.Int >= memory.Length) {
+                        status = Status.SEGFAULT;
+                        return false;
+                    }
+
+                    arg1 = memory[arg1.Int];
+                }
+
+                addr0 = arg0;
+                addr1 = arg1;
+
+                if((argRegFlags & 1) != 0) {
+                    if(arg0.Int < 0 || arg0.Int >= memory.Length) {
+                        status = Status.SEGFAULT;
+                        return false;
+                    }
+
+                    arg0 = memory[arg0.Int];
+                }
+
+                if((argRegFlags & 2) != 0) {
+                    if(arg1.Int < 0 || arg1.Int >= memory.Length) {
+                        status = Status.SEGFAULT;
+                        return false;
+                    }
+
+                    arg1 = memory[arg1.Int];
+                }
+
+                handledHere = true;
+
+                // these require no additional checks
                 switch(inst.op) {
-                    case Opcode.MOV:
-                        memory[arg0.Int] = arg1;
-                        break;
                     case Opcode.JMP:
                         pic = arg0.Int;
                         break;
@@ -494,18 +521,6 @@ namespace Oxide.Plugins
                         break;
                     case Opcode.PUSH:
                         memory[sp++] = arg0;
-                        break;
-                    case Opcode.POP:
-                        memory[arg0.Int] = memory[sp--];
-                        break;
-                    case Opcode.SHRS:
-                        memory[arg0.Int].Int = memory[arg0.Int].Int >> arg1.Int;
-                        break;
-                    case Opcode.SHRU:
-                        memory[arg0.Int].Uint = memory[arg0.Int].Uint >> arg1.Int;
-                        break;
-                    case Opcode.SHL:
-                        memory[arg0.Int].Int = memory[arg0.Int].Int << arg1.Int;
                         break;
                     case Opcode.CMPI:
                         cmp0.Int = arg0.Int;
@@ -529,43 +544,6 @@ namespace Oxide.Plugins
                     case Opcode.JLE:
                         pic = (cmp0.Int <= cmp1.Int) ? arg0.Int : pic;
                         break;
-                    case Opcode.AND:
-                        memory[arg0.Int].Int = memory[arg0.Int].Int & arg1.Int;
-                        break;
-                    case Opcode.OR:
-                        memory[arg0.Int].Int = memory[arg0.Int].Int | arg1.Int;
-                        break;
-                    case Opcode.XOR:
-                        memory[arg0.Int].Int = memory[arg0.Int].Int ^ arg1.Int;
-                        break;
-                    case Opcode.NOT:
-                        memory[arg0.Int].Int = ~memory[arg0.Int].Int;
-                        break;
-                    case Opcode.ADD:
-                        memory[arg0.Int].Int = memory[arg0.Int].Int + arg1.Int;
-                        break;
-                    case Opcode.SUB:
-                        memory[arg0.Int].Int = memory[arg0.Int].Int - arg1.Int;
-                        break;
-                    case Opcode.MUL:
-                        memory[arg0.Int].Int = memory[arg0.Int].Int * arg1.Int;
-                        break;
-                    case Opcode.DIV:
-                        if(arg1.Int == 0) {
-                            status = Status.DIVISION_BY_ZERO;
-                            return false;
-                        }
-
-                        memory[arg0.Int].Int = memory[arg0.Int].Int / arg1.Int;
-                        break;
-                    case Opcode.MOD:
-                        if(arg1.Int == 0) {
-                            status = Status.DIVISION_BY_ZERO;
-                            return false;
-                        }
-
-                        memory[arg0.Int].Int = memory[arg0.Int].Int % arg1.Int;
-                        break;
                     case Opcode.IN:
                         break;
                     case Opcode.OUT:
@@ -577,12 +555,88 @@ namespace Oxide.Plugins
                         flags.Uint |= (uint)Flags.INTERRUPTS_ENABLED;
                         break;
                     default:
-                        status = Status.MISSING_INSTRUCTION;
-                        return false;
+                        handledHere = false;
+                        break;
                 }
 
-                status = Status.SUCCESS;
-                return true;
+                if(handledHere) {
+                    status = Status.SUCCESS;
+                    return true;
+                }
+
+                // these all reference memory and need bounds check
+                if(addr0.Int < 0 || addr0.Int >= memory.Length) {
+                    status = Status.SEGFAULT;
+                    return false;
+                }
+
+                handledHere = true;
+
+                switch(inst.op) {
+                    case Opcode.MOV:
+                        memory[addr0.Int] = arg1;
+                        break;
+                    case Opcode.POP:
+                        memory[addr0.Int] = memory[sp--];
+                        break;
+                    case Opcode.SHRS:
+                        memory[addr0.Int].Int = arg0.Int >> arg1.Int;
+                        break;
+                    case Opcode.SHRU:
+                        memory[addr0.Int].Uint = arg0.Uint >> arg1.Int;
+                        break;
+                    case Opcode.SHL:
+                        memory[addr0.Int].Int = arg0.Int << arg1.Int;
+                        break;
+                    case Opcode.AND:
+                        memory[addr0.Int].Int = arg0.Int & arg1.Int;
+                        break;
+                    case Opcode.OR:
+                        memory[addr0.Int].Int = arg0.Int | arg1.Int;
+                        break;
+                    case Opcode.XOR:
+                        memory[addr0.Int].Int = arg0.Int ^ arg1.Int;
+                        break;
+                    case Opcode.NOT:
+                        memory[addr0.Int].Int = ~arg0.Int;
+                        break;
+                    case Opcode.ADD:
+                        memory[addr0.Int].Int = arg0.Int + arg1.Int;
+                        break;
+                    case Opcode.SUB:
+                        memory[addr0.Int].Int = arg0.Int - arg1.Int;
+                        break;
+                    case Opcode.MUL:
+                        memory[addr0.Int].Int = arg0.Int * arg1.Int;
+                        break;
+                    case Opcode.DIV:
+                        if(arg1.Int == 0) {
+                            status = Status.DIVISION_BY_ZERO;
+                            return false;
+                        }
+
+                        memory[addr0.Int].Int = arg0.Int / arg1.Int;
+                        break;
+                    case Opcode.MOD:
+                        if(arg1.Int == 0) {
+                            status = Status.DIVISION_BY_ZERO;
+                            return false;
+                        }
+
+                        memory[addr0.Int].Int = arg0.Int % arg1.Int;
+                        break;
+                    default:
+                        handledHere = false;
+                        break;
+                }
+
+                if(handledHere) {
+                    status = Status.SUCCESS;
+                    return true;
+                }
+
+                status = Status.MISSING_INSTRUCTION;
+                return false;
             }
         }
 
@@ -609,52 +663,57 @@ namespace Oxide.Plugins
             manager.Init(this);
 
             bool success = betterCompiler.Compile(@"
-            .const input_port 1
-            .const output_port 2
+            .word x 42
+            .word y 0
 
-            .word last_input 0
-            .word input_value 0
-
-            mov r8 [r8]
-            jmp loop
-
-            isr_input:
-                cli
-                in input_value [input_port]
-                push [input_value]
-                call do_output
-                mov last_input [input_value]
-                sei
-                ret
-
-            do_output:
-                pop r8
-                not r8
-                out output_port [r8]
-                ret
+            mov r0 0
+            jmp main
 
             main:
-                in input_value input_port
-                push [input_value]
-                call do_output
+                cmpi [x] 42
+                jne 1000
 
-            loop:
-                mov r0 12345
-                mov r1 54321
-                mov r2 [r1]
-                mul r2 [r0]
-                mov r3 123
-                mov r2 [r0]
-                div r2 [r3]
-                add r0 [r1]
-                
+                mov r0 42
+                cmpi [x] r0
+                jne 1001
+
+                mov r0 x
+                mov r1 y
+                cmpi [r0] [x]
+                jne 1002
+                cmpi [r0] 42
+                jne 1003
+
+                mov r0 2
+                add r0 3
+                cmpi r0 5
+                jne 1004
+
+                mov r0 2
+                sub r0 3
+                cmpi r0 -1
+                jne 1005
+
+                mov r0 6
+                mul r0 7
+                cmpi r0 42
+                jne 1006
+
                 mov r0 49
-                mov r1 7
-                div r0 [r1]
-                cmpi [r0] [r1]
-                jne 1000000
+                div r0 7
+                cmpi r0 7
+                jne 1007
 
-                jmp loop
+                #mov [1000000] 0
+
+                #mov x 1000000
+                #mov r0 [x]
+                #mov [r0] 0
+
+                #mov r0 1000000
+                #mov [r0] 0
+
+                jmp main
             ", 1024);
 
             if(!success) {
