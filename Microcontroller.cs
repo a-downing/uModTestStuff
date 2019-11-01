@@ -17,7 +17,7 @@ namespace Oxide.Plugins
     public class Microcontroller : RustPlugin {
         static ConfigData config;
         static Microcontroller plugin = null;
-        static Compiler compiler = null;
+        static VirtualCPUAssembler compiler = null;
         string shortName = "electrical.random.switch.deployed";
         string prefab = "assets/prefabs/deployable/playerioents/gates/randswitch/electrical.random.switch.deployed.prefab";
         static int numChannels = 4;
@@ -27,10 +27,6 @@ namespace Oxide.Plugins
         Dictionary<uint, IOEntityMapper> ioEnts = new Dictionary<uint, IOEntityMapper>();
         McuManager manager = null;
         const int maxAvgCharsPerLine = 32;
-        
-        //testing new cpu/assembler
-        VirtualCPU virtualCPU = new VirtualCPU();
-        VirtualCPUAssembler virtualCPUAssembler = new VirtualCPUAssembler();
 
         class VirtualCPUAssembler {
             List<string[]> codeLines = new List<string[]>();
@@ -151,7 +147,6 @@ namespace Oxide.Plugins
 
                 for(int i = 0; i < tokens.Count; i++) {
                     Token[] line = tokens[i];
-                    //Print($"{String.Join(", ", line)}");
 
                     if(line[0].type == Token.Type.DIRECTIVE) {
                         if(line[0].stringValue == "const" || line[0].stringValue == "word") {
@@ -262,7 +257,6 @@ namespace Oxide.Plugins
                     var line = codeLines[i];
                     tokens.Add(new Token[line.Length]);
                     var tokenLine = tokens[i];
-                    //Print($"{String.Join(", ", line)}");
 
                     for(int j = 0; j < line.Length; j++) {
                         string arg = line[j];
@@ -336,7 +330,12 @@ namespace Oxide.Plugins
             Word flags = Word.Create((uint)Flags.INTERRUPTS_ENABLED);
             Queue<int> pendingInterrupts = new Queue<int>();
             static int maxPendingInterrupts = 8;
-            public IPeripheral peripheral = null;
+            IPeripheral peripheral = null;
+            System.Random random = new System.Random();
+
+            public VirtualCPU(IPeripheral perip) {
+                peripheral = perip;
+            }
 
             int pic = 0;
             int _sp = 0;
@@ -345,19 +344,18 @@ namespace Oxide.Plugins
                 set { _sp = value; memory[(int)Register.SP].Int = value; }
             }
 
-            void Reset() {
+            public void Reset() {
                 memory = null;
                 instructions = null;
                 cmp0 = Word.Create(0);
                 cmp1 = Word.Create(0);
                 flags = Word.Create((uint)Flags.INTERRUPTS_ENABLED);
                 pendingInterrupts.Clear();
-                peripheral = null;
             }
 
-            public interface IPeripheral {
-                Word In(Word addr);
-                void Out(Word addr, Word value);
+            public abstract class IPeripheral {
+                public abstract Word Out(Word addr);
+                public abstract void In(Word addr, Word value);
             }
 
             [Flags]
@@ -462,7 +460,8 @@ namespace Oxide.Plugins
                 IN,
                 OUT,
                 CLI,
-                SEI
+                SEI,
+                RNGI
             }
 
             public enum Status {
@@ -496,7 +495,6 @@ namespace Oxide.Plugins
 
             public bool Cycle(out Status status) {
                 if(pic < 0 || pic >= instructions.Length) {
-                    Print($"pic: {pic}");
                     status = Status.OUT_OF_INSTRUCTIONS;
                     return false;
                 }
@@ -513,7 +511,6 @@ namespace Oxide.Plugins
                     pic = addr;
 
                     if(pic < 0 || pic >= instructions.Length) {
-                        Print($"pic: {pic}");
                         status = Status.OUT_OF_INSTRUCTIONS;
                         return false;
                     }
@@ -636,8 +633,9 @@ namespace Oxide.Plugins
                         break;
                     case Opcode.OUT:
                         if(peripheral != null) {
-                            peripheral.Out(arg0, arg1);
+                            peripheral.In(arg0, arg1);
                         }
+
                         break;
                     default:
                         handledHere = false;
@@ -712,8 +710,11 @@ namespace Oxide.Plugins
                         break;
                     case Opcode.IN:
                         if(peripheral != null) {
-                            memory[addr0.Int] = peripheral.In(arg1);
+                            memory[addr0.Int] = peripheral.Out(arg1);
                         }
+                        break;
+                    case Opcode.RNGI:
+                        memory[addr0.Int] = Word.Create(random.Next());
                         break;
                     default:
                         handledHere = false;
@@ -730,35 +731,6 @@ namespace Oxide.Plugins
             }
         }
 
-        class Peripheral : VirtualCPU.IPeripheral {
-            public VirtualCPU.Word In(VirtualCPU.Word addr) {
-                switch(addr.Int) {
-                    case 0:
-                        return VirtualCPU.Word.Create(33);
-                    case 1:
-                        return VirtualCPU.Word.Create(42);
-                    case 2:
-                        return VirtualCPU.Word.Create(3.14159265f);
-                }
-
-                return VirtualCPU.Word.Create(0);
-            }
-
-            public void Out(VirtualCPU.Word addr, VirtualCPU.Word value) {
-                switch(addr.Int) {
-                    case 0:
-                        Print($"Out({addr.Int}, {value.Int})");
-                        break;
-                    case 1:
-                        Print($"Out({addr.Int}, {value.Uint})");
-                        break;
-                    case 2:
-                        Print($"Out({addr.Int}, {value.Float})");
-                        break;
-                }
-            }
-        }
-
         struct IOEntityMapper {
             public ulong mcuId;
             public int index;
@@ -771,7 +743,7 @@ namespace Oxide.Plugins
         void Init() {
             config = Config.ReadObject<ConfigData>();
             plugin = this;
-            compiler = new Compiler();
+            compiler = new VirtualCPUAssembler();
 
             //Puts($"new GUID: {Guid.NewGuid()}");
         }
@@ -780,122 +752,6 @@ namespace Oxide.Plugins
             var go = new GameObject(McuManager.Guid);
             manager = go.AddComponent<McuManager>();
             manager.Init(this);
-
-            bool success = virtualCPUAssembler.Compile(@"
-            # this would be code included automatically that sets
-            # up interrupt service routines and named constants etc
-
-            # named peripheral port addresses
-            .const print_int 0
-            .const print_uint 1
-            .const print_float 2
-
-            # jmp past the isr definitions into user code
-            # alternatively the pic parameter to LoadProgram() can be set to bypass this
-            jmp user_code
-            
-            # the first isr would be at addr 0x1 since the jmp above is at 0
-            isr_0_name:
-                jmp isr_0_stub
-            isr_1_name:
-                jmp isr_1_stub
-
-            isr_0_stub:
-                ret
-            isr_1_stub:
-                ret
-
-            user_code:
-            
-            # this is where the actual user code would start
-            .word x 42
-            .word y 0
-
-            cli
-            sei
-            jmp main
-
-            .isr isr_0_name my_isr_handler
-            my_isr_handler:
-                out print_float 2.54
-                out print_int sp
-                ret
-
-            # basic tests to make sure things are working
-            # the jnes will cause a crash if things are not as expected
-            main:
-                cmpi [x] 42
-                jne 1000
-
-                mov r0 42
-                cmpi [x] r0
-                jne 1001
-
-                mov r0 x
-                mov r1 y
-                cmpi [r0] [x]
-                jne 1002
-                cmpi [r0] 42
-                jne 1003
-
-                mov r0 2
-                add r0 3
-                cmpi r0 5
-                jne 1004
-
-                mov r0 2
-                sub r0 3
-                cmpi r0 -1
-                jne 1005
-
-                mov r0 6
-                mul r0 7
-                cmpi r0 42
-                jne 1006
-
-                mov r0 49
-                div r0 7
-                cmpi r0 7
-                jne 1007
-
-                jmp main
-            ", 1024);
-
-            if(!success) {
-                foreach(string error in virtualCPUAssembler.errors) {
-                    Print($"error: {error}");
-                }
-
-                return;
-            }
-
-            virtualCPU.LoadProgram(virtualCPUAssembler.instructions.ToArray(), virtualCPUAssembler.memory, virtualCPUAssembler.programData.Count);
-            int numInstructions = 1000;
-
-            virtualCPU.peripheral = new Peripheral();
-
-            VirtualCPU.Status st;
-            if(!virtualCPU.Cycle(out st)) {
-                Print($"cpu error: {st.ToString()}");
-            }
-
-            float startTime = Time.realtimeSinceStartup;
-
-            for(int i = 0; i < numInstructions; i++) {
-                VirtualCPU.Status status;
-
-                if(i % 100 == 0) {
-                    virtualCPU.Interrupt(1);
-                }
-
-                if(!virtualCPU.Cycle(out status)) {
-                    Print($"cpu error: {status.ToString()}");
-                    break;
-                }
-            }
-
-            float elapsedTime = Time.realtimeSinceStartup - startTime;
-            Print($"{numInstructions} in {elapsedTime}s ({numInstructions / elapsedTime} instructions/s)");
         }
 
         void Unload() {
@@ -939,9 +795,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            McuComponent comp = new McuComponent{
-                id = McuId++
-            };
+            McuComponent comp = new McuComponent();
 
             IOEntity ioEnt = entity.GetComponent<IOEntity>();
             comp.channels[0] = ioEnt;
@@ -986,29 +840,30 @@ namespace Oxide.Plugins
 
             ignoreSpawn = false;
 
-            /*bool success = compiler.Compile(@"
-            jmp main
+            bool success = compiler.Compile(comp.setupCode + @"
+            main:
+                out channel 0
+                out output_energy 2
+                out channel 1
+                out output_energy 2
+                out channel 2
+                out output_energy 2
+                out channel 3
+                out output_energy 2
 
-            isr input
-                num index; pop index
-                num value; getin value index
-                print index index
-                print value value
-                setout index value
-                sei
-                ret
-
-            label main
+                rngi r0
+                out output_mask r0
+                
                 jmp main
-            ");
+            ", 1024);
 
             if(success) {
-                comp.cpu.LoadInstructions(compiler.instructions);
+                comp.cpu.LoadProgram(compiler.instructions.ToArray(), compiler.memory, compiler.programData.Count);
             } else {
                 foreach(var error in compiler.errors) {
                     Puts(error);
                 }
-            }*/
+            }
 
             McuComponents.Add(comp.id, comp);
         }
@@ -1077,31 +932,102 @@ namespace Oxide.Plugins
         }
 
         class McuComponent {
+            static ulong idCtr = 0;
             public ulong id;
             public IOEntity[] channels = new IOEntity[numChannels];
             public int[] inputEnergies = new int[numChannels];
             public int[] outputEnergies = new int[numChannels];
-            public CPU cpu = new CPU();
-            Compiler.Instruction currentInstruction = null;
-            public Flag flags;
+            public VirtualCPU cpu = null;
             public BaseEntity stash = null;
+            public string setupCode = @"
+            .const channel 0
+            .const output_energy 1
+            .const input_energy 2
+            .const output_mask 3
 
-            [Flags]
-            public enum Flag {
-                ExecutingInstruction = 1 << 1
+            jmp user_code
+
+            input:
+                jmp input_stub
+
+            input_stub:
+                ret
+
+            user_code:
+            ";
+
+            public McuComponent() {
+                cpu = new VirtualCPU(new Peripheral(this));
+                id = idCtr++;
             }
 
-            bool HasFlag(Flag f) {
-                return (this.flags & f) == f;
-            }
+            class Peripheral : VirtualCPU.IPeripheral {
+                McuComponent comp = null;
+                int[] desiredOutputEnergies = null;
+                int[] maskedOutputEnergies = null;
+                int selectedChannel = 0;
+                int outputMask = 0;
 
-            public void SetFlag(Flag f, bool set) {
-                if(set) {
-                    this.flags |= f;
-                    return;
+                enum Port {
+                    CHANNEL,
+                    OUTPUT_ENERGY,
+                    INPUT_ENERGY,
+                    OUTPUT_MASK
+                }
+                
+                public Peripheral(McuComponent comp) {
+                    this.comp = comp;
+                    desiredOutputEnergies = new int[comp.outputEnergies.Length];
+                    maskedOutputEnergies = new int[comp.outputEnergies.Length];
                 }
 
-                this.flags &= ~f;
+                void UpdateOutputEnergies() {
+                    //Print("UpdateOutputEnergies()");
+
+                    for(int i = 0; i < desiredOutputEnergies.Length; i++) {
+                        maskedOutputEnergies[i] = ((outputMask & (1 << i)) != 0) ? desiredOutputEnergies[i] : 0;
+                        //Print($"    outputMask: {Convert.ToString(outputMask, 2).PadLeft(32, '0')}");
+                        //Print($"    desiredOutputEnergies[{i}]: {desiredOutputEnergies[i]}");
+                        //Print($"    maskedOutputEnergies[{i}]: {maskedOutputEnergies[i]}");
+                    }
+
+                    comp.UpdateOutputEnergies(maskedOutputEnergies);
+                }
+
+                public override VirtualCPU.Word Out(VirtualCPU.Word addr) {
+                    //Print($"Peripheral.Out({addr.Int})");
+
+                    switch((Port)addr.Int) {
+                        case Port.CHANNEL:
+                            return VirtualCPU.Word.Create(selectedChannel);
+                        case Port.OUTPUT_ENERGY:
+                            return VirtualCPU.Word.Create(comp.outputEnergies[selectedChannel]);
+                        case Port.INPUT_ENERGY:
+                            return VirtualCPU.Word.Create(comp.inputEnergies[selectedChannel]);
+                        case Port.OUTPUT_MASK:
+                            return VirtualCPU.Word.Create(outputMask);
+                    }
+
+                    return VirtualCPU.Word.Create(0);
+                }
+
+                public override void In(VirtualCPU.Word addr, VirtualCPU.Word value) {
+                    //Print($"Peripheral.In({addr.Int}, {value.Int})");
+
+                    switch((Port)addr.Int) {
+                        case Port.CHANNEL:
+                            selectedChannel = Math.Max(0, Math.Min(value.Int, desiredOutputEnergies.Length - 1));
+                            break;
+                        case Port.OUTPUT_ENERGY:
+                            desiredOutputEnergies[selectedChannel] = value.Int;
+                            UpdateOutputEnergies();
+                            break;
+                        case Port.OUTPUT_MASK:
+                            outputMask = value.Int;
+                            UpdateOutputEnergies();
+                            break;
+                    }
+                }
             }
 
             public int TotalInputEnergy() {
@@ -1132,7 +1058,7 @@ namespace Oxide.Plugins
             public bool OnInputUpdate(int index, int inputAmount, int inputSlot) {
                 IOEntity ioEnt = channels[index];
                 IOEntity.IOSlot ioSlot = ioEnt.inputs[inputSlot];
-                Print($"OnInputUpdate({inputAmount}, {inputSlot}) slot #{inputSlot} ioSlot.niceName: {ioSlot.niceName}");
+                //Print($"OnInputUpdate({inputAmount}, {inputSlot}) slot #{inputSlot} ioSlot.niceName: {ioSlot.niceName}");
 
                 if(inputSlot != 0) {
                     return false;
@@ -1141,7 +1067,7 @@ namespace Oxide.Plugins
                 if(inputAmount != inputEnergies[index]) {
                     inputEnergies[index] = inputAmount;
                     ioEnt.IOStateChanged(inputAmount, inputSlot);
-                    cpu.Interrupt("input", new float[]{index});
+                    //cpu.Interrupt(1);
                 }
 
                 int totalEnergy = TotalInputEnergy();
@@ -1162,7 +1088,7 @@ namespace Oxide.Plugins
                 IOEntity.IOSlot ioSlot = ioEnt.outputs[outputIndex];
                 IOEntity target = ioSlot.connectedTo.Get(true);
 
-                Print($"UpdateSingleOutput({ioEntindex}, {outputIndex}, {energy}) ioSlot.niceName: {ioSlot.niceName}");
+                //Print($"UpdateSingleOutput({ioEntindex}, {outputIndex}, {energy}) ioSlot.niceName: {ioSlot.niceName}");
 
                 if(target) {
                     target.UpdateFromInput(energy, ioSlot.connectedToSlot);
@@ -1205,7 +1131,7 @@ namespace Oxide.Plugins
                             if(added) {
                                 if(lines.Length < config.maxProgramInstructions) {
                                     Reset();
-                                    bool success = compiler.Compile(item.text);
+                                    bool success = compiler.Compile(setupCode + item.text, 1024);
 
                                     if(!success) { 
                                         item.text += "\n" + String.Join("\n", compiler.errors.Select(x => {
@@ -1213,7 +1139,7 @@ namespace Oxide.Plugins
                                         }));
                                     } else {
                                         Print("loaded instructions");
-                                        cpu.LoadInstructions(compiler.instructions);
+                                        cpu.LoadProgram(compiler.instructions.ToArray(), compiler.memory, compiler.programData.Count);
                                     }
                                 } else {
                                     message = string.Format(plugin.lang.GetMessage("over_instruction_limit", plugin), config.maxProgramInstructions);
@@ -1229,7 +1155,6 @@ namespace Oxide.Plugins
             }
 
             public void Reset() {
-                currentInstruction = null;
                 cpu.Reset();
             }
 
@@ -1238,78 +1163,17 @@ namespace Oxide.Plugins
                     return;
                 }
 
-                /*if(this.currentInstruction != null && HasFlag(Flag.ExecutingInstruction)) {
-                    switch(this.currentInstruction.name) {
-                        
-                    }
-                }*/
-
-                if(cpu.HandlePendingInterrupt()) {
-                    SetFlag(Flag.ExecutingInstruction, false);
-                }
-
                 int numInstructionsExecuted = 0;
-                string failReason;
-                while(numInstructionsExecuted < config.maxInstructionsPerCycle && !HasFlag(Flag.ExecutingInstruction)) {
-                    if(!cpu.Cycle(out this.currentInstruction, out failReason)) {
-                        Print(failReason);
+                VirtualCPU.Status status;
+
+                while(numInstructionsExecuted < config.maxInstructionsPerCycle) {
+                    if(!cpu.Cycle(out status)) {
+                        Print(status.ToString());
                         Reset();
                         return;
                     }
 
                     numInstructionsExecuted++;
-
-                    if(currentInstruction.name != "label" && currentInstruction.name != "jmp") {
-                        //Print(currentInstruction.name);
-                    }
-
-                    switch(this.currentInstruction.name) {
-                        case "getin":
-                            string destVar = this.currentInstruction.args[0].stringValue;
-                            int index = this.currentInstruction.args[1].intValue;
-
-                            if(index >= 0 && index < inputEnergies.Length) {
-                                cpu.WriteVariable(destVar, inputEnergies[index]);
-                            }
-
-                            break;
-                        case "getout":
-                            destVar = this.currentInstruction.args[0].stringValue;
-                            index = this.currentInstruction.args[1].intValue;
-
-                            if(index >= 0 && index < outputEnergies.Length) {
-                                cpu.WriteVariable(destVar, outputEnergies[index]);
-                            }
-
-                            break;
-                        case "setout":
-                            index = this.currentInstruction.args[0].intValue;
-                            int value = this.currentInstruction.args[1].intValue;
-                            int[] newOutputEnergies = new int[outputEnergies.Length];
-                            outputEnergies.CopyTo(newOutputEnergies, 0);
-
-                            if(index >= 0 && index < outputEnergies.Length) {
-                                newOutputEnergies[index] = value;
-                                UpdateOutputEnergies(newOutputEnergies);
-                            }
-
-                            break;
-                        case "gettime":
-                            destVar = this.currentInstruction.args[0].stringValue;
-                            cpu.WriteVariable(destVar, Time.time);
-
-                            break;
-                        case "print":
-                            string arg1 = this.currentInstruction.args[0].stringValue;
-                            float arg2 = this.currentInstruction.args[1].floatValue;
-                            Print($"print {arg1} {arg2}");
-
-                            break;
-                    }
-
-                    //if(cpu.HandlePendingInterrupt()) {
-                    //    SetFlag(Flag.ExecutingInstruction, false);
-                    //}
                 }
             }
         }
@@ -1344,716 +1208,6 @@ namespace Oxide.Plugins
             }
 
             return null;
-        }
-
-        class CPU {
-            List<Compiler.Instruction> instructions = new List<Compiler.Instruction>();
-            public Dictionary<string, int> isrs = new Dictionary<string, int>();
-            public Queue<string> interrupts = new Queue<string>();
-            public List<int> picStack = new List<int>();
-            int pic = 0;
-            bool abort = false;
-            string abortReason = null;
-            Dictionary<string, Compiler.Instruction.Argument> numVariables = new Dictionary<string, Compiler.Instruction.Argument>();
-            public List<float> stack = new List<float>();
-            public int maxStackSize = 64;
-            bool interruptsEnabled = true;
-
-            public void Reset() {
-                pic = 0;
-                interrupts.Clear();
-                picStack.Clear();
-                numVariables.Clear();
-            }
-
-            public void LoadInstructions(List<Compiler.Instruction> instructions) {
-                this.instructions = instructions;
-                isrs.Clear();
-                interrupts.Clear();
-                picStack.Clear();
-                numVariables.Clear();
-                stack.Clear();
-                pic = 0;
-
-                for(int i = 0; i < instructions.Count; i++) {
-                    var instr = instructions[i];
-
-                    if(instr.name == "isr") {
-                        isrs.Add(instr.args[0].stringValue, i);
-                    } else if(instr.name == "num") {
-                        numVariables.Add(instr.args[0].stringValue, instr.args[0]);
-                    }
-                }
-            }
-
-            public void Jump(int addr) {
-                pic = addr;
-            }
-
-            public void Call(int addr) {
-                picStack.Add(pic);
-                pic = addr;
-            }
-
-            public bool Ret() {
-                if(picStack.Count == 0) {
-                    return false;
-                }
-
-                Jump(picStack[picStack.Count - 1]);
-                picStack.RemoveAt(picStack.Count - 1);
-
-                return true;
-            }
-
-            public void Interrupt(string name, float[] args = null) {
-                if(isrs.ContainsKey(name)) {
-                    if(args != null) {
-                        for(int i = 0; i < args.Length; i++) {
-                            stack.Add(args[i]);
-                        }
-                    }
-
-                    interrupts.Enqueue(name);
-                }
-            }
-
-            public bool WriteVariable(string name, float value) {
-                Compiler.Instruction.Argument arg;
-                if(numVariables.TryGetValue(name, out arg)) {
-                    arg.floatValue = value;
-                    arg.intValue = (int)value;
-                    return true;
-                }
-
-                return false;
-            }
-
-            public bool HandlePendingInterrupt() {
-                if(!interruptsEnabled || interrupts.Count == 0) {
-                    return false;
-                }
-
-                interruptsEnabled = false;
-
-                var isr = interrupts.Dequeue();
-                int addr;
-                isrs.TryGetValue(isr, out addr);
-                Call(addr);
-
-                return true;
-            }
-
-            public void Abort(string reason) {
-                abort = true;
-                abortReason = reason;
-            }
-
-            public bool Cycle(out Compiler.Instruction instr, out string failReason) {
-                if(instructions == null || pic < 0 || pic >= instructions.Count) {
-                    instr = null;
-                    failReason = "out of instructions";
-                    return false;
-                }
-
-                if(abort) {
-                    instr = null;
-                    failReason = abortReason;
-                    return false;
-                }
-
-                instr = instructions[pic++];
-
-                // if maybe zero arg instruction
-                if(instr.args.Count == 0) {
-                    bool isOneOfThese = true;
-
-                    switch(instr.name) {
-                        case "cli":
-                            interruptsEnabled = false;
-                            break;
-                        case "sei":
-                            interruptsEnabled = true;
-                            break;
-                        default:
-                            isOneOfThese = false;
-                            break;
-                    }
-
-                    if(isOneOfThese) {
-                        failReason = null;
-                        return true;
-                    }
-                }
-
-                // if maybe one arg instruction
-                if(instr.args.Count == 1) {
-                    bool isOneOfThese = true;
-
-                    switch(instr.name) {
-                        case "jmp":
-                            Jump(instr.args[0].intValue);
-                            break;
-                        case "call":
-                            Call(instr.args[0].intValue);
-                            break;
-                        case "int":
-                            Interrupt(instr.args[0].stringValue);
-                            break;
-                        case "ret":
-                            if(!Ret()) {
-                                failReason = "no address to return from";
-                                return false;
-                            }
-
-                            break;
-                        case "push":
-                            if(stack.Count == maxStackSize) {
-                                failReason = $"maximum stack size exceeded ({maxStackSize})";
-                                return false;
-                            }
-
-                            stack.Add(instr.args[0].floatValue);
-                            break;
-                        default:
-                            isOneOfThese = false;
-                            break;
-                    }
-
-                    if(isOneOfThese) {
-                        failReason = null;
-                        return true;
-                    }
-                }
-
-                // if maybe instruction that assigns to variable as first arg
-                if(instr.args.Count > 0 && instr.args[0].paramType == Compiler.ParamType.NumVariable) {
-                    bool isOneOfThese = true;
-                    float result = 0;
-
-                    switch(instr.name) {
-                        case "pop":
-                            if(stack.Count == 0) {
-                                failReason = "stack empty";
-                                return false;
-                            }
-
-                            result = stack[stack.Count - 1];
-                            stack.RemoveAt(stack.Count - 1);
-                            break;
-                        case "mov":
-                            result = instr.args[1].floatValue;
-                            break;
-                        default:
-                            isOneOfThese = false;
-                            break;
-                    }
-
-                    if(isOneOfThese) {
-                        instr.args[0].floatValue = result;
-                        instr.args[0].intValue = (int)result;
-                        failReason = null;
-                        return true;
-                    }
-                }
-
-                // if might be one arg math instruction
-                if(instr.args.Count == 1 && instr.args[0].paramType == Compiler.ParamType.Num) {
-                    var valueArg = instr.args[0];
-                    float result = 0;
-                    bool isOneOfThese = true;
-                    
-                    try {
-                        switch(instr.name) {
-                            case "abs":
-                                result = Mathf.Abs(valueArg.floatValue);
-                                break;
-                            case "sign":
-                                result = Mathf.Sign(valueArg.floatValue);
-                                break;
-                            case "sqrt":
-                                result = Mathf.Sqrt(valueArg.floatValue);
-                                break;
-                            case "round":
-                                result = Mathf.Round(valueArg.floatValue);
-                                break;
-                            case "floor":
-                                result = Mathf.Floor(valueArg.floatValue);
-                                break;
-                            case "ceil":
-                                result = Mathf.Ceil(valueArg.floatValue);
-                                break;
-                            default:
-                                isOneOfThese = false;
-                                break;
-                        }
-
-                        if(isOneOfThese) {
-                            if(!float.IsFinite(result)) {
-                                failReason = $"math error: {instr.name} {String.Join(" ", instr.args.Select(x => x.rawValue))} => {result}";
-                                return false;
-                            }
-
-                            WriteVariable("rslt", result);
-                            failReason = null;
-                            return true;
-                        }
-                    } catch(ArithmeticException e) {
-                        failReason = e.ToString();
-                        return false;
-                    }
-                }
-
-                // if might be two arg math instruction
-                if(instr.args.Count == 2 && instr.args[0].paramType == Compiler.ParamType.Num && instr.args[1].paramType == Compiler.ParamType.Num) {
-                    var lhsArg = instr.args[0];
-                    var rhsArg = instr.args[1];
-                    float result = 0;
-                    bool isOneOfThese = true;
-                    
-                    try {
-                        switch(instr.name) {
-                            case "add":
-                                result = lhsArg.floatValue + rhsArg.floatValue;
-                                break;
-                            case "sub":
-                                result = lhsArg.floatValue - rhsArg.floatValue;
-                                break;
-                            case "mul":
-                                result = lhsArg.floatValue * rhsArg.floatValue;
-                                break;
-                            case "div":
-                                result = lhsArg.floatValue / rhsArg.floatValue;
-                                break;
-                            case "pow":
-                                result = Mathf.Pow(lhsArg.floatValue, rhsArg.floatValue);
-                                break;
-                            case "min":
-                                result = Mathf.Min(lhsArg.floatValue, rhsArg.floatValue);
-                                break;
-                            case "max":
-                                result = Mathf.Max(lhsArg.floatValue, rhsArg.floatValue);
-                                break;
-                            default:
-                                isOneOfThese = false;
-                                break;
-                        }
-
-                        if(isOneOfThese) {
-                            if(!float.IsFinite(result)) {
-                                failReason = $"math error: {instr.name} {String.Join(" ", instr.args.Select(x => x.rawValue))} => {result}";
-                                return false;
-                            }
-
-                            WriteVariable("rslt", result);
-                            failReason = null;
-                            return true;
-                        }
-                    } catch(ArithmeticException e) {
-                        failReason = e.ToString();
-                        return false;
-                    }
-                }
-
-                if(instr.name == "lerp") {
-                    float result = Mathf.Lerp(instr.args[0].floatValue, instr.args[1].floatValue, instr.args[2].floatValue);
-                    WriteVariable("rslt", result);
-                    failReason = null;
-                    return true;
-                }
-
-                // if might be conditional jump instruction
-                if(instr.args.Count == 3 && instr.args[0].paramType == Compiler.ParamType.Num && instr.args[1].paramType == Compiler.ParamType.Num && instr.args[2].paramType == Compiler.ParamType.Address) {
-                    float lhs = instr.args[0].floatValue;
-                    float rhs = instr.args[1].floatValue;
-                    int addr = instr.args[2].intValue;
-                    bool jump = false;
-
-                    switch(instr.name) {
-                        case "ja":
-                            jump = Mathf.Approximately(lhs, rhs);
-                            break;
-                        case "je":
-                            jump = lhs == rhs;
-                            break;
-                        case "jne":
-                            jump = lhs != rhs;
-                            break;
-                        case "jna":
-                            jump = !Mathf.Approximately(lhs, rhs);
-                            break;
-                        case "jg":
-                            jump = lhs > rhs;
-                            break;
-                        case "jge":
-                            jump = lhs >= rhs;
-                            break;
-                        case "jl":
-                            jump = lhs < rhs;
-                            break;
-                        case "jle":
-                            jump = lhs <= rhs;
-                            break;
-                    }
-
-                    if(jump) {
-                        Jump(addr);
-                        failReason = null;
-                        return true;
-                    }
-                }
-
-                failReason = null;
-                return true;
-            }
-        }
-
-        class Compiler {
-            List<string[]> tokens = new List<string[]>();
-            public List<string> errors = new List<string>();
-            public List<Instruction> instructions = new List<Instruction>();
-
-            public enum ParamType {
-                Num,
-                Identifier,
-                Address,
-                NumVariable
-            }
-
-            public class Instruction {
-                public class Argument {
-                    public string name;
-                    public ParamType paramType;
-                    public ParamType argType;
-                    public string rawValue;
-                    public string stringValue;
-                    public Argument variableReference = null;
-
-                    private int _intValue;
-                    public int intValue {
-                        get {
-                            if(variableReference == null) {
-                                return _intValue;
-                            } else {
-                                return variableReference._intValue;
-                            }
-                        } set {
-                            if(variableReference == null) {
-                                _intValue = value;
-                            } else {
-                                variableReference._intValue = value;
-                            }
-                        }
-                    }
-
-                    private float _floatValue;
-                    public float floatValue {
-                        get {
-                            if(variableReference == null) {
-                                return _floatValue;
-                            } else {
-                                return variableReference._floatValue;
-                            }
-                        } set {
-                            if(variableReference == null) {
-                                _floatValue = value;
-                            } else {
-                                variableReference._floatValue = value;
-                            }
-                        }
-                    }
-                }
-
-                public string name;
-                public List<Argument> args;
-
-                public Instruction(string name) {
-                    this.name = name;
-                    this.args = new List<Argument>();
-                }
-
-                public override string ToString() {
-                    return $"{name} {String.Join(" ", args.Select(x => $"<{x.name}:{x.paramType}>"))}";
-                }
-            }
-
-            struct Param {
-                public ParamType type;
-                public string name;
-
-                public Param(string name, ParamType type) {
-                    this.name = name;
-                    this.type = type;
-                }
-            }
-
-            Dictionary<string, Param[]> instructionDefs = new Dictionary<string, Param[]> {
-                {"label", new Param[] { new Param("name", ParamType.Identifier) }},
-                {"isr", new Param[] { new Param("name", ParamType.Identifier) }},
-                {"jmp", new Param[] { new Param("label_name", ParamType.Address) }},
-                {"call", new Param[] { new Param("label_name", ParamType.Address) }},
-                {"int", new Param[] { new Param("isr_name", ParamType.Identifier) }},
-                {"ret", new Param[] {  }},
-                {"nop", new Param[] {  }},
-                {"cli", new Param[] {  }},
-                {"sei", new Param[] {  }},
-                {"num", new Param[] { new Param("var_name_decl", ParamType.Identifier) }},
-                {"push", new Param[] { new Param("value", ParamType.Num) }},
-
-                {"pop", new Param[] { new Param("var_name", ParamType.NumVariable) }},
-                {"mov", new Param[] { new Param("dest/lhs", ParamType.NumVariable), new Param("rhs", ParamType.Num) }},
-
-                {"lerp", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num), new Param("t", ParamType.Num) }},
-
-                {"add", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num) }},
-                {"sub", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num) }},
-                {"mul", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num) }},
-                {"div", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num) }},
-                {"pow", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num) }},
-                {"min", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num) }},
-                {"max", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num) }},
-
-                {"abs", new Param[] { new Param("value", ParamType.Num) }},
-                {"sign", new Param[] { new Param("value", ParamType.Num) }},
-                {"sqrt", new Param[] { new Param("value", ParamType.Num) }},
-                {"floor", new Param[] { new Param("value", ParamType.Num) }},
-                {"ceil", new Param[] { new Param("value", ParamType.Num) }},
-                {"round", new Param[] { new Param("value", ParamType.Num) }},
-
-                {"ja", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num), new Param("label_name", ParamType.Address) }},
-                {"je", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num), new Param("label_name", ParamType.Address) }},
-                {"jne", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num), new Param("label_name", ParamType.Address) }},
-                {"jna", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num), new Param("label_name", ParamType.Address) }},
-                {"jg", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num), new Param("label_name", ParamType.Address) }},
-                {"jge", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num), new Param("label_name", ParamType.Address) }},
-                {"jl", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num), new Param("label_name", ParamType.Address) }},
-                {"jle", new Param[] { new Param("lhs", ParamType.Num), new Param("rhs", ParamType.Num), new Param("label_name", ParamType.Address) }},
-
-                {"getin", new Param[] { new Param("dest", ParamType.NumVariable), new Param("index", ParamType.Num) }},
-                {"getout", new Param[] { new Param("dest", ParamType.NumVariable), new Param("index", ParamType.Num) }},
-                {"setout", new Param[] { new Param("index", ParamType.Num), new Param("value", ParamType.Num) }},
-                {"gettime", new Param[] { new Param("dest", ParamType.NumVariable)}},
-                {"print", new Param[] { new Param("arg1", ParamType.NumVariable), new Param("arg2", ParamType.Num) }}
-            };
-
-            public bool Compile(string code) {
-                errors.Clear();
-                code = Regex.Replace(code, @"#.*$", "", RegexOptions.Multiline);
-
-                Tokenize(code);
-
-                // registers r0 - r7
-                for(int i = 0; i < 8; i++) {
-                    tokens.Add(new string[]{"num", "r" + i});
-                }
-
-                // rslt register
-                tokens.Add(new string[]{"num", "rslt"});
-
-                if(!Parse()) {
-                    return false;
-                }
-
-                var labelAddresses = new Dictionary<string, int>();
-                var variables = new Dictionary<string, Instruction.Argument>();
-
-                for(int i = 0; i < instructions.Count; i++) {
-                    var instr = instructions[i];
-
-                    if(instr.name == "label") {
-                        labelAddresses.Add(instr.args[0].stringValue, i);
-                    }
-
-                    if(instr.name == "num") {
-                        var arg = instr.args[0];
-
-                        if(variables.ContainsKey(arg.stringValue)) {
-                            var message = plugin.lang.GetMessage("var_already_declared", plugin);
-                            errors.Add(string.Format(message, i, arg.stringValue));
-                            return false;
-                        }
-
-                        variables.Add(arg.stringValue, arg);
-                    }
-                }
-
-                for(int i = 0; i < instructions.Count; i++) {
-                    var instr = instructions[i];
-
-                    for(int j = 0; j < instr.args.Count; j++) {
-                        var arg = instr.args[j];
-
-                        if(arg.paramType == ParamType.Address) {
-                            int addr;
-        
-                            if(!labelAddresses.TryGetValue(arg.stringValue, out addr)) {
-                                var message = plugin.lang.GetMessage("invalid_label", plugin);
-                                errors.Add(string.Format(message, i, arg.stringValue));
-                                return false;
-                            }
-
-                            arg.intValue = addr;
-                        }
-
-                        if(arg.argType == ParamType.NumVariable) {
-                            Instruction.Argument variableArg;
-                            if(!variables.TryGetValue(arg.stringValue, out variableArg)) {
-                                var message = plugin.lang.GetMessage("var_not_declared", plugin);
-                                errors.Add(string.Format(message, i, arg.stringValue));
-                                return false;
-                            } else {
-                                arg.variableReference = variableArg;
-                            }
-                        }
-
-                        if(arg.paramType == ParamType.Num) {
-                            if(arg.argType != ParamType.Num && arg.argType != ParamType.NumVariable) {
-                                var message = plugin.lang.GetMessage("incompat_arg_type", plugin);
-                                errors.Add(string.Format(message, i, arg.stringValue, arg.argType, instr.ToString()));
-                                return false;
-                            }
-                        }
-                    }
-                }
-
-                return true;
-            }
-
-            bool ProcessInstruction(int line, string instr, string[] args, Param[] parameters) {
-                var compiledInstruction = new Instruction(instr);
-
-                Action<string> fail = (string arg) => {
-                    var message = plugin.lang.GetMessage("invalid_arg", plugin);
-                    errors.Add(string.Format(message, line, arg, instr, String.Join(" ", parameters.Select(x => x.name + ':' + x.type))));
-                };
-
-                Action<int, float, int, string, ParamType> addArgument = (int index, float floatValue, int intValue, string stringValue, Compiler.ParamType argType) => {
-                    compiledInstruction.args.Add(new Instruction.Argument {
-                        name = parameters[index].name,
-                        paramType = parameters[index].type,
-                        argType = argType,
-                        rawValue = args[index],
-                        floatValue = floatValue,
-                        intValue = intValue,
-                        stringValue = stringValue
-                    });
-                };
-
-                for(int i = 0; i < args.Length; i++) {
-                    var arg = args[i];
-                    var param = parameters[i];
-
-                    if(param.type == ParamType.Num) {
-                        var match = Regex.Match(arg, @"^[+-]*[0-9]*[\.]?[0-9]*$");
-                        var matchMapGridCol = Regex.Match(arg, @"^([a-zA-Z]{1,2})[\.]([0-9]*)?$");
-                        var matchNumVar = Regex.Match(arg, @"^[a-zA-Z_][a-zA-Z0-9_]*$");
-
-                        if(!match.Success && !matchMapGridCol.Success && !matchNumVar.Success) {
-                            fail(arg);
-                            return false;
-                        }
-
-                        if(match.Success) {
-                            if(match.Groups[0].ToString() == ".") {
-                                fail(arg);
-                                return false;
-                            }
-
-                            float value;
-                            if(!float.TryParse(arg, out value)) {
-                                fail(arg);
-                                return false;
-                            }
-
-                            addArgument(i, value, (int)value, arg, param.type);
-                        } else if(matchMapGridCol.Success) {
-                            var lettersStr = matchMapGridCol.Groups[1].ToString().ToUpper();
-                            var lettersFractionStr = matchMapGridCol.Groups[2].ToString();
-
-                            int lettersWhole = (lettersStr.Length == 1) ? lettersStr[0] - 'A' : lettersStr[1] + 26 - 'A';
-                            float lettersFraction = 0.0f;
-
-                            if(lettersFractionStr != "." && lettersFractionStr.Length != 0) {
-                                if(!float.TryParse(lettersFractionStr, out lettersFraction)) {
-                                    fail(arg);
-                                    return false;
-                                }
-                            }
-
-                            var value = lettersWhole + lettersFraction;
-                            
-                            addArgument(i, value, (int)value, arg, param.type);
-                        } else if(matchNumVar.Success) {
-                            addArgument(i, 0, 0, arg, ParamType.NumVariable);
-                        }
-                    }
-
-                    if(param.type == ParamType.Identifier || param.type == ParamType.Address || param.type == ParamType.NumVariable) {
-                        var match = Regex.Match(arg, @"^[a-zA-Z_][a-zA-Z0-9_]*$");
-
-                        if(!match.Success) {
-                            fail(arg);
-                            return false;
-                        }
-                        
-                        addArgument(i, 0, 0, arg, param.type);
-                    }
-                }
-
-                instructions.Add(compiledInstruction);
-                return true;
-            }
-
-            bool Parse() {
-                instructions.Clear();
-
-                for(int i = 0; i < tokens.Count; i++) {
-                    var line = tokens[i];
-                    var instr = line[0];
-
-                    Param[] parameters;
-                    var found = instructionDefs.TryGetValue(instr, out parameters);
-
-                    if(!found) {
-                        var message = plugin.lang.GetMessage("invalid_instruction", plugin);
-                        errors.Add(string.Format(message, i, instr));
-                        return false;
-                    }
-
-                    if(parameters.Length != line.Length - 1) {
-                        var message = plugin.lang.GetMessage("wrong_num_args", plugin);
-                        errors.Add(string.Format(message, i, instr, String.Join(" ", parameters.Select(x => x.name + ':' + x.type))));
-                        return false;
-                    }
-
-                    if(!ProcessInstruction(i, instr, line.Skip(1).ToArray(), parameters)) {
-                        return false;
-                    }
-                }
-
-                return true;
-            }
-
-            void Tokenize(string code) {
-                tokens.Clear();
-                var lines = code.Split(new[] {"\r\n", "\r", "\n", ";"}, StringSplitOptions.RemoveEmptyEntries);
-
-                for(int i = 0; i < lines.Length; i++) {
-                    lines[i] = code = Regex.Replace(lines[i].Trim() ,@"\s+"," ");
-
-                    if(lines[i].Length > 0) {
-                        if(lines[i][0] == '#') {
-                            continue;
-                        }
-
-                        var args = lines[i].Split(' ');
-
-                        if(args.Length > 0) {
-                            tokens.Add(args);
-                        }
-                    }
-                }
-            }
         }
     }
 }
