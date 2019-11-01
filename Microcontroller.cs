@@ -17,7 +17,7 @@ namespace Oxide.Plugins
     public class Microcontroller : RustPlugin {
         static ConfigData config;
         static Microcontroller plugin = null;
-        static VirtualCPUAssembler compiler = null;
+        static VirtualCPUAssembler assembler = null;
         string shortName = "electrical.random.switch.deployed";
         string prefab = "assets/prefabs/deployable/playerioents/gates/randswitch/electrical.random.switch.deployed.prefab";
         static int numChannels = 4;
@@ -36,6 +36,16 @@ namespace Oxide.Plugins
             public List<VirtualCPU.Word> programData = new List<VirtualCPU.Word>();
             public List<VirtualCPU.Instruction> instructions = new List<VirtualCPU.Instruction>();
             public VirtualCPU.Word[] memory = null;
+
+            public void Reset() {
+                codeLines.Clear();
+                tokens.Clear();
+                symbols.Clear();
+                errors.Clear();
+                programData.Clear();
+                instructions.Clear();
+                memory = null;
+            }
 
             struct Symbol {
                 public VirtualCPU.Word word;
@@ -59,18 +69,19 @@ namespace Oxide.Plugins
                 }
 
                 public bool indirect;
+                public int offset;
                 public Type type;
                 public string stringValue;
-                public int intValue;
-                public float floatValue;
                 public VirtualCPU.Word word;
 
                 public override string ToString() {
-                    return $"{{{type.ToString()}:{stringValue} indirect:{indirect} intValue:{intValue} floatValue:{floatValue}}}";
+                    return $"{{{type.ToString()}:{stringValue} indirect:{indirect}}}";
                 }
             }
 
             public bool Compile(string code, int memorySize) {
+                Reset();
+
                 if(!Preprocess(code)) {
                     return false;
                 }
@@ -218,6 +229,7 @@ namespace Oxide.Plugins
 
                         instructions.Add(VirtualCPU.Instruction.Create(opcode));
                         int instIndex = instructions.Count - 1;
+                        var inst = instructions[instIndex];
 
                         for(int j = 1; j < line.Length; j++) {
                             int argNum = j - 1;
@@ -231,7 +243,7 @@ namespace Oxide.Plugins
                                 }
 
                                 if(symbol.type == Symbol.Type.REGISTER) {
-                                    instructions[instIndex] = instructions[instIndex].SetArgIsRegister(argNum, true);
+                                    inst.SetArgIsRegister(argNum, true);
                                 }
 
                                 instructions.Add(VirtualCPU.Instruction.Create(symbol.word));
@@ -242,10 +254,48 @@ namespace Oxide.Plugins
                                 return false;
                             }
 
-                            instructions[instIndex] = instructions[instIndex].SetArgIsIndirect(argNum, line[j].indirect);
+                            inst.SetArgIsIndirect(argNum, line[j].indirect);
                         }
 
-                        instructions[instIndex] = instructions[instIndex].SetNumArgs(line.Length - 1);
+                        int numArgs = line.Length - 1;
+                        inst.SetNumArgs(numArgs);
+
+                        int minOffset = -16;
+                        int maxOffset = 15;
+                        int minFound = 0;
+                        int maxFound = 0;
+
+                        if(numArgs == 1) {
+                            inst.offset = (sbyte)line[1].offset;
+                        } else if(numArgs == 2) {
+                            if(!line[1].indirect) {
+                                inst.offset = (sbyte)line[2].offset;
+                            } else if(!line[2].indirect) {
+                                inst.offset = (sbyte)line[1].offset;
+                            } else {
+                                minOffset = -8;
+                                maxOffset = 7;
+                                inst.offset = (sbyte)(line[1].offset & 0xF);
+                                inst.offset |= (sbyte)(line[2].offset << 4);
+                            }
+                        }
+
+                        if(line.Length >= 2) {
+                            minFound = Math.Min(minFound, line[1].offset);
+                            maxFound = Math.Max(maxFound, line[1].offset);
+                        }
+
+                        if(line.Length >= 3) {
+                            minFound = Math.Min(minFound, line[2].offset);
+                            maxFound = Math.Max(maxFound, line[2].offset);
+                        }
+
+                        if(minFound < minOffset || maxFound > maxOffset) {
+                            errors.Add($"min/max offset is -16 to 15 for instructions with a single indirect arg, otherwise -8 to 7");
+                            return false;
+                        }
+
+                        instructions[instIndex] = inst;
                     }
                 }
 
@@ -261,12 +311,22 @@ namespace Oxide.Plugins
                     for(int j = 0; j < line.Length; j++) {
                         string arg = line[j];
                         tokenLine[j].indirect = false;
+                        tokenLine[j].offset = 0;
                         tokenLine[j].type = Token.Type.NONE;
                         Match indirectMatch = Regex.Match(arg, @"^\[([^\[]+)\]$");
                         
                         if(indirectMatch.Success) {
                             tokenLine[j].indirect = true;
                             arg = indirectMatch.Groups[1].ToString();
+
+                            // just get it working with integer offset for now
+                            //Match offsetMatch = Regex.Match(arg, @"^([^+-]+)([+-])([^+-]+)$");
+                            Match offsetMatch = Regex.Match(arg, @"^([^+-]+)([+-])([0-9]+)$");
+                            
+                            if(offsetMatch.Success) {
+                                arg = offsetMatch.Groups[1].ToString();
+                                int.TryParse(offsetMatch.Groups[2].ToString() + offsetMatch.Groups[3].ToString(), out tokenLine[j].offset);
+                            }
                         }
 
                         Match directiveMatch = Regex.Match(arg, @"^\.([a-zA-Z_][a-zA-Z0-9_]*)$");
@@ -339,9 +399,10 @@ namespace Oxide.Plugins
 
             int pic = 0;
             int _sp = 0;
+
             int sp {
-                get { return _sp; }
-                set { _sp = value; memory[(int)Register.SP].Int = value; }
+                get { return memory[(int)Register.SP].Int; } //_sp; }
+                set{  _sp = value; memory[(int)Register.SP] = Word.Create(value); }
             }
 
             public void Reset() {
@@ -391,24 +452,23 @@ namespace Oxide.Plugins
                 public Word word;
                 [FieldOffset(0)]
                 public Opcode op;
+                [FieldOffset(1)]
+                public sbyte offset;
                 [FieldOffset(2)]
                 public ushort argFlags;
 
-                public Instruction SetNumArgs(int num) {
+                public void SetNumArgs(int num) {
                     argFlags = (ushort)((argFlags & ~0xF) | num);
-                    return this;
                 }
 
-                public Instruction SetArgIsRegister(int argNum, bool value) {
+                public void SetArgIsRegister(int argNum, bool value) {
                     int shift = 4 + argNum;
                     argFlags = (value) ? (ushort)(argFlags | 1 << shift) : (ushort)(argFlags & ~(1 << shift));
-                    return this;
                 }
 
-                public Instruction SetArgIsIndirect(int argNum, bool value) {
+                public void SetArgIsIndirect(int argNum, bool value) {
                     int shift = 8 + argNum;
                     argFlags = (value) ? (ushort)(argFlags | 1 << shift) : (ushort)(argFlags & ~(1 << shift));
-                    return this;
                 }
 
                 public static Instruction Create(Word word) {
@@ -420,7 +480,7 @@ namespace Oxide.Plugins
                 }
 
                 public static Instruction Create(Opcode op) {
-                    return new Instruction{ op = op, argFlags = 0 };
+                    return new Instruction{ op = op, argFlags = 0, offset = 0 };
                 }
             }
 
@@ -495,6 +555,7 @@ namespace Oxide.Plugins
 
             public bool Cycle(out Status status) {
                 if(pic < 0 || pic >= instructions.Length) {
+                    Print($"pic: {pic}");
                     status = Status.OUT_OF_INSTRUCTIONS;
                     return false;
                 }
@@ -527,7 +588,12 @@ namespace Oxide.Plugins
                 int argIndirectFlags = (inst.argFlags & 0xF00) >> 8;
                 Word arg0 = Word.Create(0), arg1 = arg0;
                 Word addr0 = Word.Create(0), addr1 = addr0;
+                int arg0Offset = 0;
+                int arg1Offset = 0;
                 bool handledHere;
+
+                //Print($"pic: {pic}, sp: {sp}, inst: {inst.op}");
+                //Print($"offset: {Convert.ToString((byte)inst.offset, 2).PadLeft(8, '0')}");
 
                 if(numArgs >= 1) {
                     if(pic < 0 || pic >= instructions.Length) {
@@ -547,24 +613,6 @@ namespace Oxide.Plugins
                     arg1 = instructions[pic++].word;
                 }
 
-                if((argIndirectFlags & 1) != 0) {
-                    if(arg0.Int < 0 || arg0.Int >= memory.Length) {
-                        status = Status.SEGFAULT;
-                        return false;
-                    }
-
-                    arg0 = memory[arg0.Int];
-                }
-
-                if((argIndirectFlags & 2) != 0) {
-                    if(arg1.Int < 0 || arg1.Int >= memory.Length) {
-                        status = Status.SEGFAULT;
-                        return false;
-                    }
-
-                    arg1 = memory[arg1.Int];
-                }
-
                 addr0 = arg0;
                 addr1 = arg1;
 
@@ -574,7 +622,7 @@ namespace Oxide.Plugins
                         return false;
                     }
 
-                    arg0 = memory[arg0.Int];
+                    arg0 = memory[addr0.Int];
                 }
 
                 if((argRegFlags & 2) != 0) {
@@ -583,7 +631,53 @@ namespace Oxide.Plugins
                         return false;
                     }
 
-                    arg1 = memory[arg1.Int];
+                    arg1 = memory[addr1.Int];
+                }
+
+                if((argIndirectFlags & 1) != 0) {
+                    if((argIndirectFlags & 2) != 0) {
+                        arg0Offset = inst.offset << (32 - 4);
+                        arg0Offset >>= (32 - 4);
+                    } else {
+                        arg0Offset = inst.offset;
+                    }
+
+                    //Print($"arg0Offset: {arg0Offset}");
+                    //Print($"arg0.Int: {arg0.Int}");
+                    //Print($"arg0.Int + arg0Offset: {arg0.Int + arg0Offset}");
+
+                    addr0.Int = arg0.Int + arg0Offset;
+
+                    if(addr0.Int < 0 || addr0.Int >= memory.Length) {
+                        status = Status.SEGFAULT;
+                        return false;
+                    }
+
+                    //addr0 = arg0;
+                    arg0 = memory[addr0.Int];
+                }
+
+                if((argIndirectFlags & 2) != 0) {
+                    if((argIndirectFlags & 1) != 0) {
+                        arg1Offset = inst.offset << (32 - 8);
+                        arg1Offset >>= (32 - 4);
+                    } else {
+                        arg1Offset = inst.offset;
+                    }
+
+                    //Print($"arg1Offset: {arg1Offset}");
+                    //Print($"arg1.Int: {arg1.Int}");
+                    //Print($"arg1.Int + arg1Offset: {arg1.Int + arg1Offset}");
+
+                    addr1.Int = arg1.Int + arg1Offset;
+
+                    if(addr1.Int < 0 || addr1.Int >= memory.Length) {
+                        status = Status.SEGFAULT;
+                        return false;
+                    }
+
+                    //addr1 = arg1;
+                    arg1 = memory[addr1.Int];
                 }
 
                 handledHere = true;
@@ -598,7 +692,7 @@ namespace Oxide.Plugins
                         pic = arg0.Int;
                         break;
                     case Opcode.RET:
-                        pic = memory[sp--].Int;
+                        pic = memory[sp-- - 1].Int;
                         break;
                     case Opcode.PUSH:
                         memory[sp++] = arg0;
@@ -648,19 +742,21 @@ namespace Oxide.Plugins
                 }
 
                 // these all reference memory and need bounds check
-                if(addr0.Int < 0 || addr0.Int >= memory.Length) {
+                // wait actually they don't
+                /*if(addr0.Int < 0 || addr0.Int >= memory.Length) {
                     status = Status.SEGFAULT;
                     return false;
-                }
+                }*/
 
                 handledHere = true;
 
                 switch(inst.op) {
                     case Opcode.MOV:
+                        //Print($"MOV memory[{addr0.Int}] = {arg1.Int}");
                         memory[addr0.Int] = arg1;
                         break;
                     case Opcode.POP:
-                        memory[addr0.Int] = memory[sp--];
+                        memory[addr0.Int] = memory[sp-- - 1];
                         break;
                     case Opcode.SHRS:
                         memory[addr0.Int].Int = arg0.Int >> arg1.Int;
@@ -712,6 +808,7 @@ namespace Oxide.Plugins
                         if(peripheral != null) {
                             memory[addr0.Int] = peripheral.Out(arg1);
                         }
+
                         break;
                     case Opcode.RNGI:
                         memory[addr0.Int] = Word.Create(random.Next());
@@ -743,7 +840,7 @@ namespace Oxide.Plugins
         void Init() {
             config = Config.ReadObject<ConfigData>();
             plugin = this;
-            compiler = new VirtualCPUAssembler();
+            assembler = new VirtualCPUAssembler();
 
             //Puts($"new GUID: {Guid.NewGuid()}");
         }
@@ -752,6 +849,57 @@ namespace Oxide.Plugins
             var go = new GameObject(McuManager.Guid);
             manager = go.AddComponent<McuManager>();
             manager.Init(this);
+
+            var cpu = new VirtualCPU(null);
+
+            bool success = assembler.Compile(@"
+            .word a 0
+            .word b 0
+            .word c 0
+            .word d 0
+
+            jmp main
+
+            func:
+                mov [sp+15] 0
+                mov [sp-16] 0
+                mov [sp+7] [sp-8]
+                #mov [sp+15] [sp-16]
+                ret
+
+            main:
+                call func
+                jmp main
+            ", 1024);
+
+            if(success) {
+                cpu.LoadProgram(assembler.instructions.ToArray(), assembler.memory, assembler.programData.Count);
+            } else {
+                foreach(var error in assembler.errors) {
+                    Puts(error);
+                }
+
+                return;
+            }
+
+            const int numCycles = 1000000;
+            VirtualCPU.Status st;
+
+            if(!cpu.Cycle(out st)) {
+                Print($"cpu error: {st.ToString()}");
+            }
+
+            float startTime = Time.realtimeSinceStartup;
+
+            for(int i = 0; i < numCycles; i++) {
+                if(!cpu.Cycle(out st)) {
+                    Print($"cpu error: {st.ToString()}");
+                    break;
+                }
+            }
+
+            float elapsedTime = Time.realtimeSinceStartup - startTime;
+            Print($"{numCycles} in {elapsedTime}s ({numCycles / elapsedTime} instructions/s)");
         }
 
         void Unload() {
@@ -761,7 +909,7 @@ namespace Oxide.Plugins
 
             plugin = null;
             config = null;
-            compiler = null;
+            assembler = null;
         }
 
         void OnEntityKill(BaseNetworkable entity) {
@@ -840,27 +988,26 @@ namespace Oxide.Plugins
 
             ignoreSpawn = false;
 
-            bool success = compiler.Compile(comp.setupCode + @"
-            main:
-                out channel 0
-                out output_energy 2
-                out channel 1
-                out output_energy 2
-                out channel 2
-                out output_energy 2
-                out channel 3
-                out output_energy 2
+            bool success = assembler.Compile(comp.setupCode + @"
+            out channel 0
+            out output_energy 2
+            out channel 1
+            out output_energy 2
+            out channel 2
+            out output_energy 2
+            out channel 3
+            out output_energy 2
 
+            loop:
                 rngi r0
                 out output_mask r0
-                
-                jmp main
+                jmp loop
             ", 1024);
 
             if(success) {
-                comp.cpu.LoadProgram(compiler.instructions.ToArray(), compiler.memory, compiler.programData.Count);
+                comp.cpu.LoadProgram(assembler.instructions.ToArray(), assembler.memory, assembler.programData.Count);
             } else {
-                foreach(var error in compiler.errors) {
+                foreach(var error in assembler.errors) {
                     Puts(error);
                 }
             }
@@ -1131,15 +1278,15 @@ namespace Oxide.Plugins
                             if(added) {
                                 if(lines.Length < config.maxProgramInstructions) {
                                     Reset();
-                                    bool success = compiler.Compile(setupCode + item.text, 1024);
+                                    bool success = assembler.Compile(setupCode + item.text, 1024);
 
                                     if(!success) { 
-                                        item.text += "\n" + String.Join("\n", compiler.errors.Select(x => {
+                                        item.text += "\n" + String.Join("\n", assembler.errors.Select(x => {
                                             return string.Format(plugin.lang.GetMessage("compiler_error", plugin), x);
                                         }));
                                     } else {
                                         Print("loaded instructions");
-                                        cpu.LoadProgram(compiler.instructions.ToArray(), compiler.memory, compiler.programData.Count);
+                                        cpu.LoadProgram(assembler.instructions.ToArray(), assembler.memory, assembler.programData.Count);
                                     }
                                 } else {
                                     message = string.Format(plugin.lang.GetMessage("over_instruction_limit", plugin), config.maxProgramInstructions);
