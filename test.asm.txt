@@ -9,6 +9,8 @@ out channel 3
 out output_energy 2
 #out output_mask 0b1111
 
+jmp loop
+
 .isr input on_input_change
 on_input_change:
     rngi 0

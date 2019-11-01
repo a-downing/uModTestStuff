@@ -600,6 +600,8 @@ namespace Oxide.Plugins
                 if((flags.Int & (int)Flags.INTERRUPTS_ENABLED) != 0 && pendingInterrupts.Count != 0) {
                     int addr = pendingInterrupts.Dequeue();
 
+                    Print($"dequeued interrupt, addr: {addr}");
+
                     memory[sp++].Int = pic;
                     pic = addr;
 
@@ -622,9 +624,12 @@ namespace Oxide.Plugins
                 Word addr0 = Word.Create(0), addr1 = addr0;
                 bool handledHere;
 
-                //Print($"pic: {pic}, sp: {sp}, inst: {inst.op}, numArgs: {numArgs}");
-                //Print($"offset0: {Convert.ToString((byte)inst.offset0, 2).PadLeft(8, '0')}");
-                //Print($"offset1: {Convert.ToString((byte)inst.offset1, 2).PadLeft(8, '0')}");
+                /*Print($"pic: {pic}, sp: {sp}");
+                Print($"inst: {inst.op}");
+                Print($"offset0: {Convert.ToString((byte)inst.offset0, 2).PadLeft(8, '0')}");
+                Print($"offset1: {Convert.ToString((byte)inst.offset1, 2).PadLeft(8, '0')}");
+                Print($"numArgs: {numArgs}");
+                Print($"argFlags: {Convert.ToString((byte)inst.argFlags, 2).PadLeft(8, '0')}");*/
 
                 if(numArgs >= 1) {
                     if(pic < 0 || pic >= instructions.Length) {
@@ -1225,7 +1230,7 @@ namespace Oxide.Plugins
             public bool OnInputUpdate(int index, int inputAmount, int inputSlot) {
                 IOEntity ioEnt = channels[index];
                 IOEntity.IOSlot ioSlot = ioEnt.inputs[inputSlot];
-                Print($"OnInputUpdate({inputAmount}, {inputSlot}) slot #{inputSlot} ioSlot.niceName: {ioSlot.niceName}");
+                //Print($"OnInputUpdate({inputAmount}, {inputSlot}) slot #{inputSlot} ioSlot.niceName: {ioSlot.niceName}");
 
                 if(inputSlot != 0) {
                     return false;
@@ -1234,7 +1239,6 @@ namespace Oxide.Plugins
                 if(inputAmount != inputEnergies[index]) {
                     inputEnergies[index] = inputAmount;
                     ioEnt.IOStateChanged(inputAmount, inputSlot);
-                    Print("cpu.Interrupt(1);");
                     cpu.Interrupt(1);
                 }
 
