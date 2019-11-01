@@ -419,8 +419,8 @@ namespace Oxide.Plugins
             }
 
             public abstract class IPeripheral {
-                public abstract Word Out(Word addr);
-                public abstract void In(Word addr, Word value);
+                public abstract Word Read(Word addr);
+                public abstract void Write(Word addr, Word value);
             }
 
             [Flags]
@@ -503,7 +503,7 @@ namespace Oxide.Plugins
             public enum Register {
                 R0, R1, R2,  R3,  R4,  R5,  R6,  R7,
                 R8, R9, R10, R11, R12, R13, R14, R15,
-                SP
+                SP, BP
             }
 
             public enum Opcode : byte {
@@ -724,7 +724,7 @@ namespace Oxide.Plugins
                         break;
                     case Opcode.OUT:
                         if(peripheral != null) {
-                            peripheral.In(arg0, arg1);
+                            peripheral.Write(arg0, arg1);
                         }
 
                         break;
@@ -798,7 +798,7 @@ namespace Oxide.Plugins
                         break;
                     case Opcode.IN:
                         if(peripheral != null) {
-                            memory[addr0.Int] = peripheral.Out(arg1);
+                            memory[addr0.Int] = peripheral.Read(arg1);
                         }
 
                         break;
@@ -1137,7 +1137,7 @@ namespace Oxide.Plugins
                     comp.UpdateOutputEnergies(maskedOutputEnergies);
                 }
 
-                public override VirtualCPU.Word Out(VirtualCPU.Word addr) {
+                public override VirtualCPU.Word Read(VirtualCPU.Word addr) {
                     //Print($"Peripheral.Out({addr.Int})");
 
                     switch((Port)addr.Int) {
@@ -1154,7 +1154,7 @@ namespace Oxide.Plugins
                     return VirtualCPU.Word.Create(0);
                 }
 
-                public override void In(VirtualCPU.Word addr, VirtualCPU.Word value) {
+                public override void Write(VirtualCPU.Word addr, VirtualCPU.Word value) {
                     //Print($"Peripheral.In({addr.Int}, {value.Int})");
 
                     switch((Port)addr.Int) {
