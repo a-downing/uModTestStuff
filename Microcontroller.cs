@@ -255,51 +255,54 @@ namespace Oxide.Plugins
                             }
 
                             inst.SetArgIsIndirect(argNum, line[j].indirect);
+                            
+                            if(argNum == 0) {
+                                inst.offset0 = (sbyte)line[j].offset;
+                            } else if(argNum == 1) {
+                                inst.offset1 = (sbyte)line[j].offset;
+                            }
                         }
 
                         int numArgs = line.Length - 1;
                         inst.SetNumArgs(numArgs);
-
-                        int minOffset = -16;
-                        int maxOffset = 15;
-                        int minFound = 0;
-                        int maxFound = 0;
-
-                        if(numArgs == 1) {
-                            inst.offset = (sbyte)line[1].offset;
-                        } else if(numArgs == 2) {
-                            if(!line[1].indirect) {
-                                inst.offset = (sbyte)line[2].offset;
-                            } else if(!line[2].indirect) {
-                                inst.offset = (sbyte)line[1].offset;
-                            } else {
-                                minOffset = -8;
-                                maxOffset = 7;
-                                inst.offset = (sbyte)(line[1].offset & 0xF);
-                                inst.offset |= (sbyte)(line[2].offset << 4);
-                            }
-                        }
-
-                        if(line.Length >= 2) {
-                            minFound = Math.Min(minFound, line[1].offset);
-                            maxFound = Math.Max(maxFound, line[1].offset);
-                        }
-
-                        if(line.Length >= 3) {
-                            minFound = Math.Min(minFound, line[2].offset);
-                            maxFound = Math.Max(maxFound, line[2].offset);
-                        }
-
-                        if(minFound < minOffset || maxFound > maxOffset) {
-                            errors.Add($"min/max offset is -16 to 15 for instructions with a single indirect arg, otherwise -8 to 7");
-                            return false;
-                        }
 
                         instructions[instIndex] = inst;
                     }
                 }
 
                 return true;
+            }
+
+            bool TryParseIntegerLiteral(string str, out int value) {
+                Match decimalMatch = Regex.Match(str, @"^[+-]?[0-9]+$");
+                Match hexMatch = Regex.Match(str, @"^([+-])?0x([0-9a-zA-Z]+)$");
+                Match binMatch = Regex.Match(str, @"^([+-])?0b([01]+)$");
+
+                if(decimalMatch.Success) {
+                    value = Convert.ToInt32(decimalMatch.Groups[0].ToString(), 10);
+                    return true;
+                } else if(hexMatch.Success) {
+                    str = hexMatch.Groups[0].ToString();
+                    value = Convert.ToInt32(hexMatch.Groups[2].ToString(), 16);
+
+                    if(hexMatch.Groups[1].ToString() == "-") {
+                        value *= -1;
+                    }
+
+                    return true;
+                } else if(binMatch.Success) {
+                    str = binMatch.Groups[0].ToString();
+                    value = Convert.ToInt32(binMatch.Groups[2].ToString(), 2);
+
+                    if(binMatch.Groups[1].ToString() == "-") {
+                        value *= -1;
+                    }
+
+                    return true;
+                }
+
+                value = 0;
+                return false;
             }
 
             bool Tokenize() {
@@ -320,19 +323,22 @@ namespace Oxide.Plugins
                             arg = indirectMatch.Groups[1].ToString();
 
                             // just get it working with integer offset for now
-                            //Match offsetMatch = Regex.Match(arg, @"^([^+-]+)([+-])([^+-]+)$");
-                            Match offsetMatch = Regex.Match(arg, @"^([^+-]+)([+-])([0-9]+)$");
+                            Match offsetMatch = Regex.Match(arg, @"^([^+-]+)([+-])([0-9]+|0x[0-9a-zA-Z]+|0b[01]+)$");
                             
                             if(offsetMatch.Success) {
                                 arg = offsetMatch.Groups[1].ToString();
-                                int.TryParse(offsetMatch.Groups[2].ToString() + offsetMatch.Groups[3].ToString(), out tokenLine[j].offset);
+                                string str = offsetMatch.Groups[2].ToString() + offsetMatch.Groups[3].ToString();
+
+                                if(!TryParseIntegerLiteral(str, out tokenLine[j].offset)) {
+                                    errors.Add($"error parsing this \"{str}\"");
+                                    return false;
+                                }
                             }
                         }
 
                         Match directiveMatch = Regex.Match(arg, @"^\.([a-zA-Z_][a-zA-Z0-9_]*)$");
                         Match labelMatch = Regex.Match(arg, @"^([a-zA-Z_][a-zA-Z0-9_]*):$");
                         Match identifierMatch = Regex.Match(arg, @"^[a-zA-Z_][a-zA-Z0-9_]*$");
-                        Match integerMatch = Regex.Match(arg, @"^[+-]?[0-9]+$");
                         Match floatMatch = Regex.Match(arg, @"^[+-]?[0-9]?[\.][0-9]*$");
 
                         if(directiveMatch.Success) {
@@ -344,14 +350,13 @@ namespace Oxide.Plugins
                         } else if(identifierMatch.Success) {
                             tokenLine[j].type = (j == 0) ? Token.Type.INSTRUCTION : Token.Type.IDENTIFIER;
                             tokenLine[j].stringValue = identifierMatch.Groups[0].ToString();
-                        } else if(integerMatch.Success) {
-                            tokenLine[j].type = Token.Type.INTEGER;
-                            tokenLine[j].stringValue = integerMatch.Groups[0].ToString();
-                            int.TryParse(tokenLine[j].stringValue, out tokenLine[j].word.Int);
                         } else if(floatMatch.Success && floatMatch.Groups[0].ToString() != ".") {
                             tokenLine[j].type = Token.Type.FLOAT;
                             tokenLine[j].stringValue = floatMatch.Groups[0].ToString();
                             float.TryParse(tokenLine[j].stringValue, out tokenLine[j].word.Float);
+                        } else if(TryParseIntegerLiteral(arg, out tokenLine[j].word.Int)) {
+                            tokenLine[j].type = Token.Type.INTEGER;
+                            tokenLine[j].stringValue = arg;
                         }
                     }
                 }
@@ -393,16 +398,15 @@ namespace Oxide.Plugins
             IPeripheral peripheral = null;
             System.Random random = new System.Random();
 
-            public VirtualCPU(IPeripheral perip) {
-                peripheral = perip;
-            }
-
             int pic = 0;
-            int _sp = 0;
 
             int sp {
-                get { return memory[(int)Register.SP].Int; } //_sp; }
-                set{  _sp = value; memory[(int)Register.SP] = Word.Create(value); }
+                get { return memory[(int)Register.SP].Int; }
+                set{  memory[(int)Register.SP] = Word.Create(value); }
+            }
+
+            public VirtualCPU(IPeripheral perip) {
+                peripheral = perip;
             }
 
             public void Reset() {
@@ -453,22 +457,34 @@ namespace Oxide.Plugins
                 [FieldOffset(0)]
                 public Opcode op;
                 [FieldOffset(1)]
-                public sbyte offset;
+                public sbyte offset0;
                 [FieldOffset(2)]
-                public ushort argFlags;
+                public sbyte offset1;
+                [FieldOffset(3)]
+                public byte argFlags;
+
+                public enum FlagMask : byte {
+                    NUM_ARGS = 3,
+                    ARG0_IS_REGISTER = 4,
+                    ARG1_IS_REGISTER = 8,
+                    ARG2_IS_REGISTER = 16,
+                    ARG0_IS_INDIRECT = 32,
+                    ARG1_IS_INDIRECT = 64,
+                    ARG2_IS_INDIRECT = 128
+                }
 
                 public void SetNumArgs(int num) {
-                    argFlags = (ushort)((argFlags & ~0xF) | num);
+                    argFlags = (byte)((argFlags & ~3) | num);
                 }
 
                 public void SetArgIsRegister(int argNum, bool value) {
-                    int shift = 4 + argNum;
-                    argFlags = (value) ? (ushort)(argFlags | 1 << shift) : (ushort)(argFlags & ~(1 << shift));
+                    int shift = 2 + argNum;
+                    argFlags = value ? (byte)(argFlags | 1 << shift) : (byte)(argFlags & ~(1 << shift));
                 }
 
                 public void SetArgIsIndirect(int argNum, bool value) {
-                    int shift = 8 + argNum;
-                    argFlags = (value) ? (ushort)(argFlags | 1 << shift) : (ushort)(argFlags & ~(1 << shift));
+                    int shift = 5 + argNum;
+                    argFlags = value ? (byte)(argFlags | 1 << shift) : (byte)(argFlags & ~(1 << shift));
                 }
 
                 public static Instruction Create(Word word) {
@@ -480,7 +496,7 @@ namespace Oxide.Plugins
                 }
 
                 public static Instruction Create(Opcode op) {
-                    return new Instruction{ op = op, argFlags = 0, offset = 0 };
+                    return new Instruction{ op = op, argFlags = 0, offset0 = 0, offset1 = 0 };
                 }
             }
 
@@ -584,16 +600,13 @@ namespace Oxide.Plugins
 
                 Instruction inst = instructions[pic++];
                 int numArgs = inst.argFlags & 0xF;
-                int argRegFlags = (inst.argFlags & 0xF0) >> 4;
-                int argIndirectFlags = (inst.argFlags & 0xF00) >> 8;
                 Word arg0 = Word.Create(0), arg1 = arg0;
                 Word addr0 = Word.Create(0), addr1 = addr0;
-                int arg0Offset = 0;
-                int arg1Offset = 0;
                 bool handledHere;
 
                 //Print($"pic: {pic}, sp: {sp}, inst: {inst.op}");
-                //Print($"offset: {Convert.ToString((byte)inst.offset, 2).PadLeft(8, '0')}");
+                //Print($"offset0: {Convert.ToString((byte)inst.offset0, 2).PadLeft(8, '0')}");
+                //Print($"offset1: {Convert.ToString((byte)inst.offset1, 2).PadLeft(8, '0')}");
 
                 if(numArgs >= 1) {
                     if(pic < 0 || pic >= instructions.Length) {
@@ -616,7 +629,7 @@ namespace Oxide.Plugins
                 addr0 = arg0;
                 addr1 = arg1;
 
-                if((argRegFlags & 1) != 0) {
+                if((inst.argFlags & (byte)Instruction.FlagMask.ARG0_IS_REGISTER) != 0) {
                     if(arg0.Int < 0 || arg0.Int >= memory.Length) {
                         status = Status.SEGFAULT;
                         return false;
@@ -625,7 +638,7 @@ namespace Oxide.Plugins
                     arg0 = memory[addr0.Int];
                 }
 
-                if((argRegFlags & 2) != 0) {
+                if((inst.argFlags & (byte)Instruction.FlagMask.ARG1_IS_REGISTER) != 0) {
                     if(arg1.Int < 0 || arg1.Int >= memory.Length) {
                         status = Status.SEGFAULT;
                         return false;
@@ -634,49 +647,33 @@ namespace Oxide.Plugins
                     arg1 = memory[addr1.Int];
                 }
 
-                if((argIndirectFlags & 1) != 0) {
-                    if((argIndirectFlags & 2) != 0) {
-                        arg0Offset = inst.offset << (32 - 4);
-                        arg0Offset >>= (32 - 4);
-                    } else {
-                        arg0Offset = inst.offset;
-                    }
-
-                    //Print($"arg0Offset: {arg0Offset}");
+                if((inst.argFlags & (byte)Instruction.FlagMask.ARG0_IS_INDIRECT) != 0) {
+                    //Print($"inst.offset0: {inst.offset0}");
                     //Print($"arg0.Int: {arg0.Int}");
-                    //Print($"arg0.Int + arg0Offset: {arg0.Int + arg0Offset}");
+                    //Print($"arg0.Int + inst.offset0: {arg0.Int + inst.offset0}");
 
-                    addr0.Int = arg0.Int + arg0Offset;
+                    addr0.Int = arg0.Int + inst.offset0;
 
                     if(addr0.Int < 0 || addr0.Int >= memory.Length) {
                         status = Status.SEGFAULT;
                         return false;
                     }
 
-                    //addr0 = arg0;
                     arg0 = memory[addr0.Int];
                 }
 
-                if((argIndirectFlags & 2) != 0) {
-                    if((argIndirectFlags & 1) != 0) {
-                        arg1Offset = inst.offset << (32 - 8);
-                        arg1Offset >>= (32 - 4);
-                    } else {
-                        arg1Offset = inst.offset;
-                    }
-
-                    //Print($"arg1Offset: {arg1Offset}");
+                if((inst.argFlags & (byte)Instruction.FlagMask.ARG1_IS_INDIRECT) != 0) {
+                    //Print($"inst.offset1: {inst.offset1}");
                     //Print($"arg1.Int: {arg1.Int}");
-                    //Print($"arg1.Int + arg1Offset: {arg1.Int + arg1Offset}");
+                    //Print($"arg1.Int + inst.offset1: {arg1.Int + inst.offset1}");
 
-                    addr1.Int = arg1.Int + arg1Offset;
+                    addr1.Int = arg1.Int + inst.offset1;
 
                     if(addr1.Int < 0 || addr1.Int >= memory.Length) {
                         status = Status.SEGFAULT;
                         return false;
                     }
 
-                    //addr1 = arg1;
                     arg1 = memory[addr1.Int];
                 }
 
@@ -741,12 +738,7 @@ namespace Oxide.Plugins
                     return true;
                 }
 
-                // these all reference memory and need bounds check
-                // wait actually they don't
-                /*if(addr0.Int < 0 || addr0.Int >= memory.Length) {
-                    status = Status.SEGFAULT;
-                    return false;
-                }*/
+                // I had a reason to separate these before
 
                 handledHere = true;
 
@@ -862,9 +854,13 @@ namespace Oxide.Plugins
 
             func:
                 mov [sp+15] 0
+                mov [sp+0xF] 0
+                mov [sp+0b1111] 0
                 mov [sp-16] 0
+                mov [sp-0x10] 0
+                mov [sp-0b10000] 0
                 mov [sp+7] [sp-8]
-                #mov [sp+15] [sp-16]
+                #mov [sp+100] [sp-100]
                 ret
 
             main:
