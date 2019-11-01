@@ -1,46 +1,21 @@
 #asm
-num now
-num next
-num delay
+out channel 0
+out output_energy 2
+out channel 1
+out output_energy 2
+out channel 2
+out output_energy 2
+out channel 3
+out output_energy 2
+#out output_mask 0b1111
 
-mov delay 0.25
-gettime now
-add now delay
-mov next rslt
-
-jmp main
-
-isr input
-    num index; pop index
-    num value; getin value index
-    print index index
-    print value value
-    #setout index value
-    sei
+.isr input on_input_change
+on_input_change:
+    rngi 0
+    out output_mask r0
     ret
 
-label main
-    gettime now
-    #print next next
-    #print now now
-    #print delay delay
-    jge now next toggle
-    jmp main
-
-label toggle
-    num energy
-    gettime now
-    add now delay
-    mov next rslt
-    getout energy 0
-
-    je energy 0 on
-    jne energy 0 off
-
-    label off
-       setout 0 0
-       jmp main
-
-    label on
-        setout 0 2
-        jmp main
+loop:
+    #rngi 0
+    #out output_mask r0
+    jmp loop

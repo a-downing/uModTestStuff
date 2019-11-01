@@ -397,6 +397,7 @@ namespace Oxide.Plugins
             static int maxPendingInterrupts = 8;
             IPeripheral peripheral = null;
             System.Random random = new System.Random();
+            public bool ready = false;
 
             int pic = 0;
 
@@ -416,6 +417,7 @@ namespace Oxide.Plugins
                 cmp1 = Word.Create(0);
                 flags = Word.Create((uint)Flags.INTERRUPTS_ENABLED);
                 pendingInterrupts.Clear();
+                ready = false;
             }
 
             public abstract class IPeripheral {
@@ -558,9 +560,14 @@ namespace Oxide.Plugins
                 memory.CopyTo(this.memory, 0);
                 this.pic = pic;
                 this.sp = bsp;
+                ready = true;
             }
 
             public bool Interrupt(int addr) {
+                if(!ready) {
+                    return false;
+                }
+
                 if(pendingInterrupts.Count >= maxPendingInterrupts) {
                     return false;
                 }
@@ -569,14 +576,23 @@ namespace Oxide.Plugins
                 return true;
             }
 
+            public void Fail(int i) {
+                Print($"Fail({i})");
+                Print($"pic: {pic}");
+                Print($"sp: {sp}");
+            }
+
             public bool Cycle(out Status status) {
+                int ctr = 0;
+
                 if(pic < 0 || pic >= instructions.Length) {
-                    Print($"pic: {pic}");
+                    Fail(ctr++);
                     status = Status.OUT_OF_INSTRUCTIONS;
                     return false;
                 }
 
                 if(sp < 0 || sp >= memory.Length) {
+                    Fail(ctr++);
                     status = Status.SEGFAULT;
                     return false;
                 }
@@ -588,28 +604,31 @@ namespace Oxide.Plugins
                     pic = addr;
 
                     if(pic < 0 || pic >= instructions.Length) {
+                        Fail(ctr++);
                         status = Status.OUT_OF_INSTRUCTIONS;
                         return false;
                     }
 
                     if(sp < 0 || sp >= memory.Length) {
+                        Fail(ctr++);
                         status = Status.SEGFAULT;
                         return false;
                     }
                 }
 
                 Instruction inst = instructions[pic++];
-                int numArgs = inst.argFlags & 0xF;
+                int numArgs = inst.argFlags & (int)Instruction.FlagMask.NUM_ARGS;
                 Word arg0 = Word.Create(0), arg1 = arg0;
                 Word addr0 = Word.Create(0), addr1 = addr0;
                 bool handledHere;
 
-                //Print($"pic: {pic}, sp: {sp}, inst: {inst.op}");
+                //Print($"pic: {pic}, sp: {sp}, inst: {inst.op}, numArgs: {numArgs}");
                 //Print($"offset0: {Convert.ToString((byte)inst.offset0, 2).PadLeft(8, '0')}");
                 //Print($"offset1: {Convert.ToString((byte)inst.offset1, 2).PadLeft(8, '0')}");
 
                 if(numArgs >= 1) {
                     if(pic < 0 || pic >= instructions.Length) {
+                        Fail(ctr++);
                         status = Status.OUT_OF_INSTRUCTIONS;
                         return false;
                     }
@@ -619,6 +638,7 @@ namespace Oxide.Plugins
 
                 if(numArgs >= 2) {
                     if(pic < 0 || pic >= instructions.Length) {
+                        Fail(ctr++);
                         status = Status.OUT_OF_INSTRUCTIONS;
                         return false;
                     }
@@ -631,6 +651,7 @@ namespace Oxide.Plugins
 
                 if((inst.argFlags & (byte)Instruction.FlagMask.ARG0_IS_REGISTER) != 0) {
                     if(arg0.Int < 0 || arg0.Int >= memory.Length) {
+                        Fail(ctr++);
                         status = Status.SEGFAULT;
                         return false;
                     }
@@ -640,6 +661,7 @@ namespace Oxide.Plugins
 
                 if((inst.argFlags & (byte)Instruction.FlagMask.ARG1_IS_REGISTER) != 0) {
                     if(arg1.Int < 0 || arg1.Int >= memory.Length) {
+                        Fail(ctr++);
                         status = Status.SEGFAULT;
                         return false;
                     }
@@ -655,6 +677,7 @@ namespace Oxide.Plugins
                     addr0.Int = arg0.Int + inst.offset0;
 
                     if(addr0.Int < 0 || addr0.Int >= memory.Length) {
+                        Fail(ctr++);
                         status = Status.SEGFAULT;
                         return false;
                     }
@@ -670,6 +693,7 @@ namespace Oxide.Plugins
                     addr1.Int = arg1.Int + inst.offset1;
 
                     if(addr1.Int < 0 || addr1.Int >= memory.Length) {
+                        Fail(ctr++);
                         status = Status.SEGFAULT;
                         return false;
                     }
@@ -744,7 +768,6 @@ namespace Oxide.Plugins
 
                 switch(inst.op) {
                     case Opcode.MOV:
-                        //Print($"MOV memory[{addr0.Int}] = {arg1.Int}");
                         memory[addr0.Int] = arg1;
                         break;
                     case Opcode.POP:
@@ -842,7 +865,7 @@ namespace Oxide.Plugins
             manager = go.AddComponent<McuManager>();
             manager.Init(this);
 
-            var cpu = new VirtualCPU(null);
+            /*var cpu = new VirtualCPU(null);
 
             bool success = assembler.Compile(@"
             .word a 0
@@ -895,7 +918,7 @@ namespace Oxide.Plugins
             }
 
             float elapsedTime = Time.realtimeSinceStartup - startTime;
-            Print($"{numCycles} in {elapsedTime}s ({numCycles / elapsedTime} instructions/s)");
+            Print($"{numCycles} in {elapsedTime}s ({numCycles / elapsedTime} instructions/s)");*/
         }
 
         void Unload() {
@@ -984,7 +1007,8 @@ namespace Oxide.Plugins
 
             ignoreSpawn = false;
 
-            bool success = assembler.Compile(comp.setupCode + @"
+            // bind p "give note 10;env.time 12;god true;give hammer;give planner;give wood 5000;give stones 5000;give wiretool;give electric.solarpanel.large;give electric.random.switch;give ceilinglight 4"
+            /*bool success = assembler.Compile(comp.setupCode + @"
             out channel 0
             out output_energy 2
             out channel 1
@@ -1006,7 +1030,7 @@ namespace Oxide.Plugins
                 foreach(var error in assembler.errors) {
                     Puts(error);
                 }
-            }
+            }*/
 
             McuComponents.Add(comp.id, comp);
         }
@@ -1201,7 +1225,7 @@ namespace Oxide.Plugins
             public bool OnInputUpdate(int index, int inputAmount, int inputSlot) {
                 IOEntity ioEnt = channels[index];
                 IOEntity.IOSlot ioSlot = ioEnt.inputs[inputSlot];
-                //Print($"OnInputUpdate({inputAmount}, {inputSlot}) slot #{inputSlot} ioSlot.niceName: {ioSlot.niceName}");
+                Print($"OnInputUpdate({inputAmount}, {inputSlot}) slot #{inputSlot} ioSlot.niceName: {ioSlot.niceName}");
 
                 if(inputSlot != 0) {
                     return false;
@@ -1210,7 +1234,8 @@ namespace Oxide.Plugins
                 if(inputAmount != inputEnergies[index]) {
                     inputEnergies[index] = inputAmount;
                     ioEnt.IOStateChanged(inputAmount, inputSlot);
-                    //cpu.Interrupt(1);
+                    Print("cpu.Interrupt(1);");
+                    cpu.Interrupt(1);
                 }
 
                 int totalEnergy = TotalInputEnergy();
@@ -1309,7 +1334,7 @@ namespace Oxide.Plugins
                 int numInstructionsExecuted = 0;
                 VirtualCPU.Status status;
 
-                while(numInstructionsExecuted < config.maxInstructionsPerCycle) {
+                while(numInstructionsExecuted < config.maxInstructionsPerCycle && cpu.ready) {
                     if(!cpu.Cycle(out status)) {
                         Print(status.ToString());
                         Reset();
