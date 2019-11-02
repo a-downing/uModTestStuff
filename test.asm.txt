@@ -19,4 +19,5 @@ on_input_change:
 loop:
     rngi r0
     out output_mask r0
+    out update 0
     jmp loop

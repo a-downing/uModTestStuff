@@ -394,8 +394,8 @@ namespace Oxide.Plugins
             Word cmp1 = Word.Create(0);
             Word flags = Word.Create((uint)Flags.INTERRUPTS_ENABLED);
             Queue<int> pendingInterrupts = new Queue<int>();
+            public IPeripheral peripheral = null;
             static int maxPendingInterrupts = 8;
-            IPeripheral peripheral = null;
             System.Random random = new System.Random();
             public bool ready = false;
 
@@ -1078,6 +1078,7 @@ namespace Oxide.Plugins
         class McuManager : MonoBehaviour {
             public const string Guid = "d7106397-4efc-44c6-b541-1312fb455cde";
             public Microcontroller plugin = null;
+            static float startTime = Time.realtimeSinceStartup;
 
             public void Init(Microcontroller plugin) {
                 this.plugin = plugin;
@@ -1093,6 +1094,10 @@ namespace Oxide.Plugins
                 foreach(var value in plugin.McuComponents) {
                     var comp = value.Value;
                     comp.CycleCPU();
+
+                    if(comp.wantsUpdate && Time.realtimeSinceStartup > comp.lastUpdateTime + IOEntity.responsetime) {
+                        comp.UpdateMaskedOutput();
+                    }
                 }
             }
 
@@ -1109,13 +1114,17 @@ namespace Oxide.Plugins
             public IOEntity[] channels = new IOEntity[numChannels];
             public int[] inputEnergies = new int[numChannels];
             public int[] outputEnergies = new int[numChannels];
+            public int[] maskedOutputEnergies = new int[numChannels];
             public VirtualCPU cpu = null;
             public BaseEntity stash = null;
+            public float lastUpdateTime = 0;
+            public bool wantsUpdate = false;
             public string setupCode = @"
             .const channel 0
             .const output_energy 1
             .const input_energy 2
             .const output_mask 3
+            .const update 4
 
             jmp user_code
 
@@ -1136,7 +1145,6 @@ namespace Oxide.Plugins
             class Peripheral : VirtualCPU.IPeripheral {
                 McuComponent comp = null;
                 int[] desiredOutputEnergies = null;
-                int[] maskedOutputEnergies = null;
                 int selectedChannel = 0;
                 int outputMask = 0;
 
@@ -1144,31 +1152,24 @@ namespace Oxide.Plugins
                     CHANNEL,
                     OUTPUT_ENERGY,
                     INPUT_ENERGY,
-                    OUTPUT_MASK
+                    OUTPUT_MASK,
+                    UPDATE
                 }
                 
                 public Peripheral(McuComponent comp) {
                     this.comp = comp;
                     desiredOutputEnergies = new int[comp.outputEnergies.Length];
-                    maskedOutputEnergies = new int[comp.outputEnergies.Length];
                 }
 
-                void UpdateOutputEnergies() {
-                    //Print("UpdateOutputEnergies()");
-
+                public void UpdateMaskedOutputEnergies() {
                     for(int i = 0; i < desiredOutputEnergies.Length; i++) {
-                        maskedOutputEnergies[i] = ((outputMask & (1 << i)) != 0) ? desiredOutputEnergies[i] : 0;
-                        //Print($"    outputMask: {Convert.ToString(outputMask, 2).PadLeft(32, '0')}");
-                        //Print($"    desiredOutputEnergies[{i}]: {desiredOutputEnergies[i]}");
-                        //Print($"    maskedOutputEnergies[{i}]: {maskedOutputEnergies[i]}");
+                        comp.maskedOutputEnergies[i] = ((outputMask & (1 << i)) != 0) ? desiredOutputEnergies[i] : 0;
                     }
 
-                    comp.UpdateOutputEnergies(maskedOutputEnergies);
+                    comp.UpdateMaskedOutput();
                 }
 
                 public override VirtualCPU.Word Read(VirtualCPU.Word addr) {
-                    //Print($"Peripheral.Out({addr.Int})");
-
                     switch((Port)addr.Int) {
                         case Port.CHANNEL:
                             return VirtualCPU.Word.Create(selectedChannel);
@@ -1184,19 +1185,18 @@ namespace Oxide.Plugins
                 }
 
                 public override void Write(VirtualCPU.Word addr, VirtualCPU.Word value) {
-                    //Print($"Peripheral.In({addr.Int}, {value.Int})");
-
                     switch((Port)addr.Int) {
                         case Port.CHANNEL:
                             selectedChannel = Math.Max(0, Math.Min(value.Int, desiredOutputEnergies.Length - 1));
                             break;
                         case Port.OUTPUT_ENERGY:
                             desiredOutputEnergies[selectedChannel] = value.Int;
-                            UpdateOutputEnergies();
                             break;
                         case Port.OUTPUT_MASK:
                             outputMask = value.Int;
-                            UpdateOutputEnergies();
+                            break;
+                        case Port.UPDATE:
+                            UpdateMaskedOutputEnergies();
                             break;
                     }
                 }
@@ -1212,7 +1212,19 @@ namespace Oxide.Plugins
                 return sum;
             }
 
+            public void UpdateMaskedOutput() {
+                UpdateOutputEnergies(maskedOutputEnergies);
+            }
+
             public void UpdateOutputEnergies(int[] energies) {
+                if(Time.realtimeSinceStartup <= lastUpdateTime + IOEntity.responsetime) {
+                    wantsUpdate = true;
+                    return;
+                }
+
+                wantsUpdate = false;
+                lastUpdateTime = Time.realtimeSinceStartup;
+                
                 int availableEnergy = TotalInputEnergy();
                 int used = 0;
 
