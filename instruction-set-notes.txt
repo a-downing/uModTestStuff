@@ -3,7 +3,7 @@ New arch somewhat similar to ARM, but much simpler
 64 registers
 instructions can take three registers, two registers and one 9-bit immediate value, or one register and one 16 bit immediate value
 if the bits of the immediate value are all set to 1, the immediate value is the 32-bit value of the next instruction (instruction takes 2 clock cycles)
-conditions: EQ, NE, GT, GE, LT, LE, RESERVED_1, RESERVED_2
+conditions: AL, EQ, NE, GT, GE, LT, LE, RESERVED
 opcode: 0 - 62, 63 is reserved
 
 condition    opcode                    reg1                        reg2                     
