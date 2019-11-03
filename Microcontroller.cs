@@ -857,6 +857,10 @@ namespace Oxide.Plugins
             Interface.Oxide.LogInfo(msg, new object[]{});
         }
 
+        static void PrintVar<T>(string name, T var) {
+            Print($"{name}: {var}");
+        }
+
         void Init() {
             config = Config.ReadObject<ConfigData>();
             plugin = this;
