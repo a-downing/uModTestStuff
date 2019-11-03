@@ -1,0 +1,2 @@
+implement offsets
+immediate too big to fit need to produce an additional instruction holding the actual value
