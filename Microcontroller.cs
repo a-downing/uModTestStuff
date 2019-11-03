@@ -855,7 +855,7 @@ namespace Oxide.Plugins
 
             var cpu = new VirtualCPU(null);
 
-            bool success = assembler.Compile(@"
+            /*bool success = assembler.Compile(@"
             main:
                 mov r0 33
                 mov r1 42
@@ -873,6 +873,13 @@ namespace Oxide.Plugins
                 mov r1 42
                 add r3 r0 r1
                 mov r4 r3
+                jmp main
+            ", 1024);*/
+
+            bool success = assembler.Compile(@"
+            main:
+                push 42
+                pop 0
                 jmp main
             ", 1024);
 
