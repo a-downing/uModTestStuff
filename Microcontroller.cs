@@ -39,14 +39,6 @@ namespace Oxide.Plugins
             public int numInstructions;
             List<KeyValuePair<Symbol, Symbol>> isrs = new List<KeyValuePair<Symbol, Symbol>>();
 
-            static void Print(string msg) {
-                Console.WriteLine(msg);
-            }
-
-            static void PrintVar<T>(string name, T var) {
-                Print($"{name}: {var}");
-            }
-
             public void Reset() {
                 statements.Clear();
                 symbols.Clear();
@@ -650,14 +642,6 @@ namespace Oxide.Plugins
             public uint pc = 0;
             public uint peripheralBase = 0;
             Status savedStatus;
-
-            static void Print(string msg) {
-                Console.WriteLine(msg);
-            }
-
-            static void PrintVar<T>(string name, T var) {
-                Print($"{name}: {var}");
-            }
 
             public CPU(IPeripheral peripheral, uint peripheralBase) {
                 this.peripheral = peripheral;
@@ -1312,7 +1296,7 @@ namespace Oxide.Plugins
         protected override void LoadDefaultConfig() {
             var config = new ConfigData {
                 maxProgramInstructions = 512,
-                maxInstructionsPerCycle = 32,
+                maxInstructionsPerCycle = 1,
                 CPUFreq = 10
             };
 
@@ -1373,11 +1357,11 @@ namespace Oxide.Plugins
             public float lastUpdateTime = 0;
             public bool wantsUpdate = false;
             public string setupCode = @"
-            .const channel 0
-            .const output_energy 1
-            .const input_energy 2
-            .const output_mask 3
-            .const update 4
+            .const channel 0x80000000
+            .const output_energy 0x80000001
+            .const input_energy 0x80000002
+            .const output_mask 0x80000003
+            .const update 0x80000004
 
             input:
                 jmp input_stub
@@ -1412,6 +1396,10 @@ namespace Oxide.Plugins
                 }
 
                 public void UpdateMaskedOutputEnergies() {
+                    Print("UpdateMaskedOutputEnergies");
+                    Print($"outputMask: {Convert.ToString(outputMask, 2).PadLeft(32, '0')}");
+                    Print($"desiredOutputEnergies: [{String.Join(", ", desiredOutputEnergies)}]");
+
                     for(int i = 0; i < desiredOutputEnergies.Length; i++) {
                         comp.maskedOutputEnergies[i] = ((outputMask & (1 << i)) != 0) ? desiredOutputEnergies[i] : 0;
                     }
@@ -1420,6 +1408,8 @@ namespace Oxide.Plugins
                 }
 
                 public CPU.Value32 Read(uint addr) {
+                    Print($"CPU.Value32 Read(uint addr: {addr})");
+
                     switch((Port)addr) {
                         case Port.CHANNEL:
                             return new CPU.Value32 { Int = selectedChannel };
@@ -1435,6 +1425,8 @@ namespace Oxide.Plugins
                 }
 
                 public void Write(uint addr, CPU.Value32 value) {
+                    Print($"void Write(uint addr: {addr}, CPU.Value32 value: {value.Int}");
+
                     switch((Port)addr) {
                         case Port.CHANNEL:
                             selectedChannel = Math.Max(0, Math.Min(value.Int, desiredOutputEnergies.Length - 1));
