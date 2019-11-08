@@ -399,7 +399,7 @@ namespace Oxide.Plugins
             }
         }
 
-        class VirtualCPU {
+        class CPU {
             uint[] registers = new uint[64];
             Word[] memory = null;
             uint[] instructions = null;

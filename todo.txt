@@ -1,3 +1,0 @@
-implement offsets
-immediate too big to fit need to produce an additional instruction holding the actual value
-get rid of the Word struct and just use uints
