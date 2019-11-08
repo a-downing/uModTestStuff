@@ -3,4 +3,4 @@ obj/
 ignore-*
 node_modules/
 *.json
-robopaste.js
+*.js

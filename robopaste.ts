@@ -1,19 +1,28 @@
 import fs from 'fs'
+import config from './robopaste.config'
 
-let config = require('./robopaste.config.js')
-let keys = Object.keys(config)
+interface SourceLocation {
+    filename: string,
+    start: RegExp
+}
 
-for(let i = 0; i < keys.length; i++) {
-    let filename = keys[i]
-    let source = fs.readFileSync(filename, 'utf8')
-    let regex = config[filename]
-    let match = source.match(config[filename].start)
+interface Replacement {
+    source: SourceLocation,
+    target: SourceLocation
+}
+
+export { Replacement }
+
+for(let i = 0; i < config.length; i++) {
+    let replacement = config[i]
+    let source = fs.readFileSync(replacement.source.filename, 'utf8')
+    let match = source.match(replacement.source.start)
 
     if(match && match.index) {
         let copy = getMatch(match, source)
         let copyIndentation = getIndentation(match.index - 1, source)
-        let target = fs.readFileSync(config[filename].target.filename, 'utf8')
-        match = target.match(config[filename].target.start)
+        let target = fs.readFileSync(replacement.target.filename, 'utf8')
+        match = target.match(replacement.target.start)
 
         if(match && match.index) {
             let paste = getMatch(match, target)
@@ -38,12 +47,12 @@ for(let i = 0; i < keys.length; i++) {
             }
 
             newSource += target.substring(match.index + paste.length)
-            console.log(newSource)
+            fs.writeFileSync(replacement.target.filename, newSource, 'utf8');
         }  else {
-            console.log(`failed to find paste "${config[filename].target.start} in "${config[filename].target.filename}"`)
+            console.log(`failed to find paste "${replacement.target.start} in "${replacement.target.filename}"`)
         }
     } else {
-        console.log(`failed to find copy "${config[filename]} in "${filename}"`)
+        console.log(`failed to find copy "${replacement.source.start} in "${replacement.source.filename}"`)
     }
 }
 
