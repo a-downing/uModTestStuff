@@ -17,7 +17,7 @@ namespace Oxide.Plugins
     public class Microcontroller : RustPlugin {
         static ConfigData config;
         static Microcontroller plugin = null;
-        static VirtualCPUAssembler assembler = null;
+        static Assembler assembler = null;
         string shortName = "electrical.random.switch.deployed";
         string prefab = "assets/prefabs/deployable/playerioents/gates/randswitch/electrical.random.switch.deployed.prefab";
         static int numChannels = 4;
@@ -28,32 +28,41 @@ namespace Oxide.Plugins
         McuManager manager = null;
         const int maxAvgCharsPerLine = 32;
 
-        class VirtualCPUAssembler {
-            List<string[]> codeLines = new List<string[]>();
-            List<Token[]> tokens = new List<Token[]>();
-            Dictionary<string, Symbol> symbols = new Dictionary<string, Symbol>();
+        class Assembler {
+            List<Statement> statements = new List<Statement>();
+            public Dictionary<string, Symbol> symbols = new Dictionary<string, Symbol>();
             public List<string> errors = new List<string>();
-            public List<VirtualCPU.Word> programData = new List<VirtualCPU.Word>();
-            public List<VirtualCPU.Instruction> instructions = new List<VirtualCPU.Instruction>();
-            public VirtualCPU.Word[] memory = null;
+            public List<byte> programData = new List<byte>();
+            public List<Instruction> instructions = new List<Instruction>();
+            public List<uint> code = new List<uint>();
+            public byte[] memory = null;
+            public int numInstructions;
+            List<KeyValuePair<Symbol, Symbol>> isrs = new List<KeyValuePair<Symbol, Symbol>>();
 
             public void Reset() {
-                codeLines.Clear();
-                tokens.Clear();
+                statements.Clear();
                 symbols.Clear();
                 errors.Clear();
                 programData.Clear();
                 instructions.Clear();
+                code.Clear();
                 memory = null;
+                isrs.Clear();
             }
 
-            struct Symbol {
-                public VirtualCPU.Word word;
+            struct Statement {
+                public int lineNum;
+                public string[] line;
+                public Token[] tokens;
+            }
+
+            public struct Variable {
+                public CPU.Value32 val32;
                 public Type type;
+                public int size;
 
                 public enum Type {
-                    ADDRESS,
-                    REGISTER
+                    NONE, UNKNOWN, INT, UINT, BYTE, FLOAT
                 }
             }
 
@@ -68,14 +77,103 @@ namespace Oxide.Plugins
                     FLOAT
                 }
 
-                public bool indirect;
                 public int offset;
                 public Type type;
                 public string stringValue;
-                public VirtualCPU.Word word;
+                public Variable var;
+                public string cond;
+            }
 
-                public override string ToString() {
-                    return $"{{{type.ToString()}:{stringValue} indirect:{indirect}}}";
+            public struct Symbol {
+                public string name;
+                public Variable var;
+                public int labelInstructionIndex;
+                public Type type;
+
+                public enum Type {
+                    NONE,
+                    LABEL,
+                    LITERAL,
+                    CONSTANT,
+                    REGISTER
+                }
+            }
+
+            public void LoadProgramToCPU(CPU cpu) {
+                cpu.Reset();
+                cpu.instructions = new uint[numInstructions];
+                cpu.memory = new byte[memory.Length];
+                memory.CopyTo(cpu.memory, 0);
+                cpu.registers[(int)CPU.Register.SP] = (uint)programData.Count;
+                cpu.pc = symbols["main"].var.val32.Uint;
+                int instructionIndex = 0;
+
+                for(int i = 0; i < instructions.Count; i++) {
+                    var instruction = instructions[i];
+                    cpu.instructions[instructionIndex++] = instruction.Create();
+
+                    if(instruction.additionalInstructions == null) {
+                        continue;
+                    }
+
+                    for(int j = 0; j < instruction.additionalInstructions.Length; j++) {
+                        cpu.instructions[instructionIndex++] = instruction.additionalInstructions[j];
+                    }
+                }
+
+                cpu.flags |= (uint)CPU.Flag.READY;
+            }
+
+            public struct Instruction {
+                public CPU.Opcode opcode;
+                public CPU.Cond cond;
+                public List<CPU.Register> operands;
+                public Symbol immediate;
+                public int address;
+                public uint[] additionalInstructions;
+
+                public int AdditionalInstructions(bool ignoreLabelAddresses) {
+                    if(immediate.type == Symbol.Type.NONE || (immediate.type == Symbol.Type.LABEL && ignoreLabelAddresses)) {
+                        return 0;
+                    }
+
+                    if(immediate.var.type == Variable.Type.FLOAT) {
+                        return 1;
+                    } else if(immediate.var.type == Variable.Type.UNKNOWN) {
+                        return immediate.var.size / sizeof(uint);
+                    } else if(immediate.var.type == Variable.Type.INT) {
+                        if(immediate.var.val32.Uint >= GetMaxImmediateValue(operands.Count + 1)) {
+                            return 1;
+                        }
+                    }
+
+                    return 0;
+                }
+
+                public uint Create() {
+                    uint instruction = (uint)cond << (int)CPU.Instruction.COND_SHIFT;
+                    instruction |= (uint)opcode << (int)CPU.Instruction.OPCODE_SHIFT;
+
+                    for(int i = 0; i < operands.Count; i++) {
+                        switch(i) {
+                            case 0:
+                                instruction |= (uint)((uint)operands[i] << (int)CPU.Instruction.OP1_SHIFT);
+                                instruction |= (uint)CPU.Instruction.OP1_FLAG_MASK;
+                                break;
+                            case 1:
+                                instruction |= (uint)((uint)operands[i] << (int)CPU.Instruction.OP2_SHIFT);
+                                instruction |= (uint)CPU.Instruction.OP2_FLAG_MASK;
+                                break;
+                            case 2:
+                                instruction |= (uint)((uint)operands[i] << (int)CPU.Instruction.OP3_SHIFT);
+                                instruction |= (uint)CPU.Instruction.OP3_FLAG_MASK;
+                                break;
+                        }
+                    }
+
+                    instruction |= immediate.var.val32.Uint;
+
+                    return instruction;
                 }
             }
 
@@ -94,25 +192,34 @@ namespace Oxide.Plugins
                     return false;
                 }
 
+                if(!symbols.ContainsKey("main")) {
+                    errors.Add($"program must define \"main:\" entry point");
+                    return false;
+                }
+
+                if(!GenerateCode()) {
+                    return false;
+                }
+
                 if(memorySize < programData.Count) {
                     errors.Add($"program data is larger than desired memory size ({memorySize} < {programData.Count})");
                     return false;
                 }
 
-                memory = new VirtualCPU.Word[memorySize];
+                memory = new byte[memorySize];
                 programData.CopyTo(memory, 0);
 
                 return true;
             }
 
-            bool TryStringToOpcode(string str, out VirtualCPU.Opcode opcode) {
-                var names = Enum.GetNames(typeof(VirtualCPU.Opcode));
-                var values = Enum.GetValues(typeof(VirtualCPU.Opcode));
+            static bool TryStringToOpcode(string str, out CPU.Opcode opcode) {
+                var names = Enum.GetNames(typeof(CPU.Opcode));
+                var values = Enum.GetValues(typeof(CPU.Opcode));
                 str = str.ToUpperInvariant();
-                
+            
                 for(int i = 0; i < names.Length; i++) {
                     if(names[i] == str) {
-                        opcode = (VirtualCPU.Opcode)values.GetValue(i);
+                        opcode = (CPU.Opcode)values.GetValue(i);
                         return true;
                     }
                 }
@@ -121,159 +228,301 @@ namespace Oxide.Plugins
                 return false;
             }
 
+            static bool TryStringToCond(string str, out CPU.Cond cond) {
+                var names = Enum.GetNames(typeof(CPU.Cond));
+                var values = Enum.GetValues(typeof(CPU.Cond));
+                str = str.ToUpperInvariant();
+            
+                for(int i = 0; i < names.Length; i++) {
+                    if(names[i] == str) {
+                        cond = (CPU.Cond)values.GetValue(i);
+                        return true;
+                    }
+                }
+
+                cond = 0;
+                return false;
+            }
+
             void AllocateRegisters() {
-                var names = Enum.GetNames(typeof(VirtualCPU.Register));
+                var names = Enum.GetNames(typeof(CPU.Register));
 
                 for(int i = 0; i < names.Length; i++) {
-                    programData.Add(VirtualCPU.Word.Create(0));
+                    var name = names[i].ToLowerInvariant();
 
-                    symbols.Add(names[i].ToLowerInvariant(), new Symbol {
-                        word = VirtualCPU.Word.Create(i),
+                    symbols.Add(name, new Symbol {
+                        name = name,
+                        var = new Variable{ val32 = new CPU.Value32{ Int = i } },
                         type = Symbol.Type.REGISTER
                     });
                 }
             }
 
-            bool Parse() {
-                AllocateRegisters();
-                int numInstructions = 0;
+            void AddData(Variable var, int size) {
+                //todo: don't ignore size
+                programData.Add(var.val32.byte0);
+                programData.Add(var.val32.byte1);
+                programData.Add(var.val32.byte2);
+                programData.Add(var.val32.byte3);
+            }
 
-                for(int i = 0; i < tokens.Count; i++) {
-                    Token[] line = tokens[i];
+            static uint GetMaxImmediateValue(int argNum) {
+                switch(argNum) {
+                    case 1:
+                        return (uint)CPU.Instruction.IMM1_MASK;
+                    case 2:
+                        return (uint)CPU.Instruction.IMM2_MASK;
+                    case 3:
+                        return (uint)CPU.Instruction.IMM3_MASK;
+                }
 
-                    if(line[0].type == Token.Type.LABEL) {
-                        if(symbols.ContainsKey(line[0].stringValue)) {
-                            errors.Add($"redefinition of identifier \"{line[0].stringValue}\"");
-                            return false;
+                return 0;
+            }
+
+            void AddError(int line, string error) {
+                errors.Add($"[error] line {line}: {error}");
+            }
+
+            bool GenerateCode() {
+                numInstructions = 0;
+
+                // first pass, can't update label addresses yet
+                for(int i = 0; i < instructions.Count; i++) {
+                    Instruction instruction = instructions[i];
+                    int additionalInstructions = instruction.AdditionalInstructions(true);
+
+                    if(additionalInstructions != 0) {
+                        instruction.additionalInstructions = new uint[additionalInstructions];
+
+                        //todo: support more than int, uint, and float
+                        instruction.additionalInstructions[0] = instruction.immediate.var.val32.Uint;
+                        instruction.immediate.var.val32.Uint = GetMaxImmediateValue(instruction.operands.Count + 1);
+                    }
+
+                    instruction.address = numInstructions;
+                    numInstructions += 1 + additionalInstructions;
+
+                    instructions[i] = instruction;
+                }
+
+                int growth = 0;
+
+                for(int i = 0; i < instructions.Count; i++) {
+                    Instruction instruction = instructions[i];
+                
+                    if(instruction.immediate.type == Symbol.Type.LABEL) {
+                        uint maxValue = GetMaxImmediateValue(instruction.operands.Count + 1);
+                        var immediate = instruction.immediate;
+                        Instruction target = instructions[instruction.immediate.labelInstructionIndex];
+
+                        if(target.address + growth >= maxValue) {
+                            growth++;
+                            numInstructions++;
+                            instruction.additionalInstructions = new uint[1];
+                            instruction.additionalInstructions[0] = (uint)(target.address + growth);
+                            instruction.immediate.var.val32.Uint = maxValue;
                         } else {
-                            symbols.Add(line[0].stringValue, new Symbol {
-                                word = VirtualCPU.Word.Create(numInstructions),
-                                type = Symbol.Type.ADDRESS
-                            });
+                            instruction.immediate.var.val32.Int = target.address + growth;
                         }
-                    } else if(line[0].type == Token.Type.INSTRUCTION) {
-                        numInstructions += line.Length;
+
+                        if(!symbols.ContainsKey(instruction.immediate.name)) {
+                            errors.Add($"missing symbol \"{instruction.immediate.name}\" (this should never happen)");
+                            return false;
+                        }
+
+                        var symbol = symbols[instruction.immediate.name];
+                        symbol.var.val32.Int = target.address + growth;
+                        symbols[instruction.immediate.name] = symbol;
+                    }
+
+                    instructions[i] = instruction;
+
+                    //Print($"{instruction.opcode} [{String.Join(", ", instruction.operands)}] {instruction.immediate.word.Uint} [{(instruction.additionalInstructions == null ? "" : String.Join(", ", instruction.additionalInstructions))}]");
+                }
+
+                List<KeyValuePair<string, Symbol>> changes = new List<KeyValuePair<string, Symbol>>();
+
+                foreach(var pair in symbols) {
+                    Symbol symbol = pair.Value;
+
+                    if(symbol.type == Symbol.Type.LABEL) {
+                        int addr = instructions[symbol.labelInstructionIndex].address;
+
+                        if(symbol.var.val32.Int != addr) {
+                            symbol.var.val32.Int = addr;
+                            changes.Add(new KeyValuePair<string, Symbol>(pair.Key, symbol));
+                        }
                     }
                 }
 
-                for(int i = 0; i < tokens.Count; i++) {
-                    Token[] line = tokens[i];
+                foreach(var pair in changes) {
+                    symbols[pair.Key] = pair.Value;
+                }
 
-                    if(line[0].type == Token.Type.DIRECTIVE) {
-                        if(line[0].stringValue == "const" || line[0].stringValue == "word") {
-                            if(line.Length != 3 || line[1].type != Token.Type.IDENTIFIER || (line[2].type != Token.Type.INTEGER && line[2].type != Token.Type.FLOAT)) {
-                                errors.Add($"invalid directive");
+                foreach(var pair in isrs) {
+                    Symbol target = pair.Key;
+                    Symbol replacement = pair.Value;
+                    Instruction targetInstruction = instructions[target.labelInstructionIndex];
+                    Instruction replacementInstruction = instructions[replacement.labelInstructionIndex];
+
+                    if(targetInstruction.additionalInstructions != null) {
+                        errors.Add($"isr \"{target.name}\" is broken, stub address is too large");
+                        return false;
+                    } else if(replacementInstruction.address >= GetMaxImmediateValue(1)) {
+                        errors.Add($"isr \"{replacement.name}\" address is too large");
+                        return false;
+                    }
+
+                    targetInstruction.immediate.var.val32.Int = replacementInstruction.address;
+                    instructions[target.labelInstructionIndex] = targetInstruction;
+                }
+
+                return true;
+            }
+
+            bool Parse() {
+                AllocateRegisters();
+                numInstructions = 0;
+
+                for(int i = 0; i < statements.Count; i++) {
+                    var statement = statements[i];
+
+                    if(statement.tokens[0].type == Token.Type.LABEL) {
+                        if(symbols.ContainsKey(statement.tokens[0].stringValue)) {
+                            AddError(statement.lineNum, $"redefinition of identifier \"{statement.tokens[0].stringValue}\"");
+                            return false;
+                        } else {
+                            symbols.Add(statement.tokens[0].stringValue, new Symbol {
+                                name = statement.tokens[0].stringValue,
+                                var = new Variable {
+                                    type = Variable.Type.NONE
+                                },
+                                labelInstructionIndex = numInstructions,
+                                type = Symbol.Type.LABEL
+                            });
+                        }
+                    } else if(statement.tokens[0].type == Token.Type.INSTRUCTION) {
+                        numInstructions++;
+                    }
+                }
+
+                for(int i = 0; i < statements.Count; i++) {
+                    var statement = statements[i];
+
+                    if(statement.tokens[0].type == Token.Type.DIRECTIVE) {
+                        if(statement.tokens[0].stringValue == "const" || statement.tokens[0].stringValue == "word") {
+                            if(statement.tokens.Length != 3 || statement.tokens[1].type != Token.Type.IDENTIFIER || (statement.tokens[2].type != Token.Type.INTEGER && statement.tokens[2].type != Token.Type.FLOAT)) {
+                                AddError(statement.lineNum, $"invalid directive");
                                 return false;
                             }
 
-                            if(symbols.ContainsKey(line[1].stringValue)) {
-                                errors.Add($"redefinition of identifier \"{line[1].stringValue}\"");
+                            if(symbols.ContainsKey(statement.tokens[1].stringValue)) {
+                                AddError(statement.lineNum, $"redefinition of identifier \"{statement.tokens[1].stringValue}\"");
                                 return false;
                             } else {
-                                if(line[0].stringValue == "const") {
-                                    symbols.Add(line[1].stringValue, new Symbol {
-                                        word = line[2].word,
-                                        type = Symbol.Type.ADDRESS
+                                if(statement.tokens[0].stringValue == "const") {
+                                    symbols.Add(statement.tokens[1].stringValue, new Symbol {
+                                        name = statement.tokens[1].stringValue,
+                                        var = statement.tokens[2].var,
+                                        type = Symbol.Type.CONSTANT
                                     });
                                 } else {
-                                    programData.Add(line[2].word);
+                                    int addr = programData.Count;
+                                    AddData(statement.tokens[2].var, 4);
 
-                                    symbols.Add(line[1].stringValue, new Symbol {
-                                        word = VirtualCPU.Word.Create(programData.Count - 1),
-                                        type = Symbol.Type.ADDRESS
+                                    symbols.Add(statement.tokens[1].stringValue, new Symbol {
+                                        name = statement.tokens[1].stringValue,
+                                        var = new Variable{ val32 = new CPU.Value32{ Int = addr }},
+                                        type = Symbol.Type.CONSTANT
                                     });
                                 }
                             }
-                        } else if(line[0].stringValue == "isr") {
-                            if(line.Length != 3 || line[1].type != Token.Type.IDENTIFIER ||line[2].type != Token.Type.IDENTIFIER) {
-                                errors.Add($"invalid directive");
+                        } else if(statement.tokens[0].stringValue == "isr") {
+                            if(statement.tokens.Length != 3 || statement.tokens[1].type != Token.Type.IDENTIFIER ||statement.tokens[2].type != Token.Type.IDENTIFIER) {
+                                AddError(statement.lineNum, $"invalid directive");
                                 return false;
                             }
 
-                            Symbol labelAddr0;
-                            Symbol labelAddr1;
+                            Symbol target;
+                            Symbol replacement;
 
-                            if(!symbols.TryGetValue(line[1].stringValue, out labelAddr0)) {
-                                errors.Add($"invalid isr directive, no identifier \"{line[1].stringValue}\"");
+                            if(!symbols.TryGetValue(statement.tokens[1].stringValue, out target)) {
+                                AddError(statement.lineNum, $"invalid isr directive, no symbol \"{statement.tokens[1].stringValue}\"");
                                 return false;
-                            } else if(labelAddr0.type != Symbol.Type.ADDRESS) {
-                                errors.Add($"invalid isr directive, identifier \"{line[1].stringValue}\" is not an address");
+                            } else if(target.type != Symbol.Type.LABEL) {
+                                AddError(statement.lineNum, $"invalid isr directive, symbol \"{statement.tokens[1].stringValue}\" is not a label");
                                 return false;
                             }
 
-                            if(!symbols.TryGetValue(line[2].stringValue, out labelAddr1)) {
-                                errors.Add($"invalid isr directive, no identifier \"{line[2].stringValue}\"");
+                            if(!symbols.TryGetValue(statement.tokens[2].stringValue, out replacement)) {
+                                AddError(statement.lineNum, $"invalid isr directive, no symbol \"{statement.tokens[2].stringValue}\"");
                                 return false;
-                            } else if(labelAddr1.type != Symbol.Type.ADDRESS) {
-                                errors.Add($"invalid isr directive, identifier \"{line[2].stringValue}\" is not an address");
+                            } else if(replacement.type != Symbol.Type.LABEL) {
+                                AddError(statement.lineNum, $"invalid isr directive, symbol \"{statement.tokens[2].stringValue}\" is not a label");
                                 return false;
                             }
 
-                            var inst = instructions[labelAddr0.word.Int + 1];
-                            inst.word.Int = labelAddr1.word.Int;
-                            instructions[labelAddr0.word.Int + 1] = inst;
+                            isrs.Add(new KeyValuePair<Symbol, Symbol>(target, replacement));
                         } else {
-                            errors.Add($"unknown directive \"{line[0].stringValue}\"");
+                            AddError(statement.lineNum, $"unknown directive \"{statement.tokens[0].stringValue}\"");
                             return false;
                         }
-                    } else if(line[0].type == Token.Type.INSTRUCTION) {
-                        VirtualCPU.Opcode opcode;
+                    } else if(statement.tokens[0].type == Token.Type.INSTRUCTION) {
+                        var instruction = new Instruction {
+                            opcode = 0,
+                            cond = 0,
+                            operands = new List<CPU.Register>(),
+                            address = 0,
+                            additionalInstructions = null,
+                            immediate = new Symbol {
+                                var = new Variable{ type = Variable.Type.NONE },
+                                type = Symbol.Type.NONE
+                            }
+                        };
 
-                        if(!TryStringToOpcode(line[0].stringValue, out opcode)) {
-                            errors.Add($"unknown opcode \"{line[0].stringValue}\"");
-                            return false;
-                        } else if(line.Length > 3) {
-                            errors.Add($"no instructions take more than two arguments");
+                        if(!TryStringToOpcode(statement.tokens[0].stringValue, out instruction.opcode)) {
+                            AddError(statement.lineNum, $"unknown opcode \"{statement.tokens[0].stringValue}\"");
                             return false;
                         }
 
-                        instructions.Add(VirtualCPU.Instruction.Create(opcode));
-                        int instIndex = instructions.Count - 1;
-                        var inst = instructions[instIndex];
+                        if(!TryStringToCond(statement.tokens[0].cond, out instruction.cond)) {
+                            AddError(statement.lineNum, $"unknown condition \"{statement.tokens[0].cond}\"");
+                            return false;
+                        }
 
-                        for(int j = 1; j < line.Length; j++) {
-                            int argNum = j - 1;
-
-                            if(line[j].type == Token.Type.IDENTIFIER) {
+                        for(int j = 1; j < statement.tokens.Length; j++) {
+                            if(statement.tokens[j].type == Token.Type.IDENTIFIER) {
                                 Symbol symbol;
 
-                                if(!symbols.TryGetValue(line[j].stringValue, out symbol)) {
-                                    errors.Add($"unknown identifier \"{line[j].stringValue}\"");
+                                if(!symbols.TryGetValue(statement.tokens[j].stringValue, out symbol)) {
+                                    AddError(statement.lineNum, $"unknown identifier \"{statement.tokens[j].stringValue}\"");
                                     return false;
                                 }
 
                                 if(symbol.type == Symbol.Type.REGISTER) {
-                                    inst.SetArgIsRegister(argNum, true);
+                                    instruction.operands.Add((CPU.Register)symbol.var.val32.Uint);
+                                } else {
+                                    instruction.immediate = symbol;
                                 }
-
-                                instructions.Add(VirtualCPU.Instruction.Create(symbol.word));
-                            } else if(line[j].type == Token.Type.INTEGER || line[j].type == Token.Type.FLOAT) {
-                                instructions.Add(VirtualCPU.Instruction.Create(line[j].word));
+                            } else if(statement.tokens[j].type == Token.Type.INTEGER || statement.tokens[j].type == Token.Type.FLOAT) {
+                                instruction.immediate = new Symbol {
+                                    var = statement.tokens[j].var,
+                                    type = Symbol.Type.LITERAL
+                                };
                             } else {
-                                errors.Add($"invalid instruction argument \"{line[j].stringValue}\"");
+                                AddError(statement.lineNum, $"invalid instruction argument \"{statement.tokens[j].stringValue}\"");
                                 return false;
-                            }
-
-                            inst.SetArgIsIndirect(argNum, line[j].indirect);
-                            
-                            if(argNum == 0) {
-                                inst.offset0 = (sbyte)line[j].offset;
-                            } else if(argNum == 1) {
-                                inst.offset1 = (sbyte)line[j].offset;
                             }
                         }
 
-                        int numArgs = line.Length - 1;
-                        inst.SetNumArgs(numArgs);
-
-                        instructions[instIndex] = inst;
+                        instructions.Add(instruction);
                     }
                 }
 
                 return true;
             }
 
-            bool TryParseIntegerLiteral(string str, out int value) {
+            static bool TryParseIntegerLiteral(string str, out int value) {
                 Match decimalMatch = Regex.Match(str, @"^[+-]?[0-9]+$");
                 Match hexMatch = Regex.Match(str, @"^([+-])?0x([0-9a-zA-Z]+)$");
                 Match binMatch = Regex.Match(str, @"^([+-])?0b([01]+)$");
@@ -305,58 +554,48 @@ namespace Oxide.Plugins
                 return false;
             }
 
-            bool Tokenize() {
-                for(int i = 0; i < codeLines.Count; i++) {
-                    var line = codeLines[i];
-                    tokens.Add(new Token[line.Length]);
-                    var tokenLine = tokens[i];
+            bool Tokenize() {       
+                for(int i = 0; i < statements.Count; i++) {
+                    var statement = statements[i];
 
-                    for(int j = 0; j < line.Length; j++) {
-                        string arg = line[j];
-                        tokenLine[j].indirect = false;
-                        tokenLine[j].offset = 0;
-                        tokenLine[j].type = Token.Type.NONE;
-                        Match indirectMatch = Regex.Match(arg, @"^\[([^\[]+)\]$");
-                        
-                        if(indirectMatch.Success) {
-                            tokenLine[j].indirect = true;
-                            arg = indirectMatch.Groups[1].ToString();
+                    for(int j = 0; j < statement.line.Length; j++) {
+                        string arg = statement.line[j];
 
-                            // just get it working with integer offset for now
-                            Match offsetMatch = Regex.Match(arg, @"^([^+-]+)([+-])([0-9]+|0x[0-9a-zA-Z]+|0b[01]+)$");
-                            
-                            if(offsetMatch.Success) {
-                                arg = offsetMatch.Groups[1].ToString();
-                                string str = offsetMatch.Groups[2].ToString() + offsetMatch.Groups[3].ToString();
-
-                                if(!TryParseIntegerLiteral(str, out tokenLine[j].offset)) {
-                                    errors.Add($"error parsing this \"{str}\"");
-                                    return false;
-                                }
-                            }
-                        }
+                        statement.tokens[j].offset = 0;
+                        statement.tokens[j].type = Token.Type.NONE;
 
                         Match directiveMatch = Regex.Match(arg, @"^\.([a-zA-Z_][a-zA-Z0-9_]*)$");
                         Match labelMatch = Regex.Match(arg, @"^([a-zA-Z_][a-zA-Z0-9_]*):$");
                         Match identifierMatch = Regex.Match(arg, @"^[a-zA-Z_][a-zA-Z0-9_]*$");
+                        Match instructionMatch = Regex.Match(arg, @"^([a-zA-Z_][a-zA-Z0-9_]*)\.(al|eq|ne|gt|ge|lt|le)$");
                         Match floatMatch = Regex.Match(arg, @"^[+-]?[0-9]?[\.][0-9]*$");
 
                         if(directiveMatch.Success) {
-                            tokenLine[j].type = Token.Type.DIRECTIVE;
-                            tokenLine[j].stringValue = directiveMatch.Groups[1].ToString();
+                            statement.tokens[j].type = Token.Type.DIRECTIVE;
+                            statement.tokens[j].stringValue = directiveMatch.Groups[1].ToString();
                         } else if(labelMatch.Success) {
-                            tokenLine[j].type = Token.Type.LABEL;
-                            tokenLine[j].stringValue = labelMatch.Groups[1].ToString();
+                            statement.tokens[j].type = Token.Type.LABEL;
+                            statement.tokens[j].stringValue = labelMatch.Groups[1].ToString();
                         } else if(identifierMatch.Success) {
-                            tokenLine[j].type = (j == 0) ? Token.Type.INSTRUCTION : Token.Type.IDENTIFIER;
-                            tokenLine[j].stringValue = identifierMatch.Groups[0].ToString();
+                            statement.tokens[j].type = (j == 0) ? Token.Type.INSTRUCTION : Token.Type.IDENTIFIER;
+                            statement.tokens[j].stringValue = identifierMatch.Groups[0].ToString();
+
+                            if(statement.tokens[j].type == Token.Type.INSTRUCTION) {
+                                statement.tokens[j].cond = "al";
+                            }
+                        } else if(instructionMatch.Success) {
+                            statement.tokens[j].type = Token.Type.INSTRUCTION;
+                            statement.tokens[j].stringValue = instructionMatch.Groups[1].ToString();
+                            statement.tokens[j].cond = instructionMatch.Groups[2].ToString();
                         } else if(floatMatch.Success && floatMatch.Groups[0].ToString() != ".") {
-                            tokenLine[j].type = Token.Type.FLOAT;
-                            tokenLine[j].stringValue = floatMatch.Groups[0].ToString();
-                            float.TryParse(tokenLine[j].stringValue, out tokenLine[j].word.Float);
-                        } else if(TryParseIntegerLiteral(arg, out tokenLine[j].word.Int)) {
-                            tokenLine[j].type = Token.Type.INTEGER;
-                            tokenLine[j].stringValue = arg;
+                            statement.tokens[j].type = Token.Type.FLOAT;
+                            statement.tokens[j].stringValue = floatMatch.Groups[0].ToString();
+                            float.TryParse(statement.tokens[j].stringValue, out statement.tokens[j].var.val32.Float);
+                            statement.tokens[j].var.type = Variable.Type.FLOAT;
+                        } else if(TryParseIntegerLiteral(arg, out statement.tokens[j].var.val32.Int)) {
+                            statement.tokens[j].type = Token.Type.INTEGER;
+                            statement.tokens[j].stringValue = arg;
+                            statement.tokens[j].var.type = Variable.Type.INT;
                         }
                     }
                 }
@@ -365,8 +604,8 @@ namespace Oxide.Plugins
             }
 
             bool Preprocess(string code) {
-                var lines = code.Split(new[] {"\r\n", "\r", "\n", ";"}, StringSplitOptions.RemoveEmptyEntries);
-                
+                var lines = code.Split(new[] {"\r\n", "\r", "\n"}, StringSplitOptions.None);
+            
                 for(int i = 0; i < lines.Length; i++) {
                     lines[i] = code = Regex.Replace(lines[i].Trim() ,@"\s+"," ");
 
@@ -378,7 +617,11 @@ namespace Oxide.Plugins
                         var args = lines[i].Split(' ');
 
                         if(args.Length > 0) {
-                            codeLines.Add(args);
+                            statements.Add(new Statement {
+                                lineNum = i,
+                                line = args,
+                                tokens = new Token[args.Length]
+                            });
                         }
                     }
                 }
@@ -387,119 +630,93 @@ namespace Oxide.Plugins
             }
         }
 
-        class VirtualCPU {
-            Word[] memory = null;
-            Instruction[] instructions = null;
-            Word cmp0 = Word.Create(0);
-            Word cmp1 = Word.Create(0);
-            Word flags = Word.Create((uint)Flags.INTERRUPTS_ENABLED);
-            Queue<int> pendingInterrupts = new Queue<int>();
+        class CPU {
+            public uint[] registers = new uint[64];
+            public byte[] memory = null;
+            public uint[] instructions = null;
+            public uint flags = (uint)Flag.INTERRUPTS_ENABLED;
+            Queue<uint> pendingInterrupts = new Queue<uint>();
             public IPeripheral peripheral = null;
-            static int maxPendingInterrupts = 8;
+            static int maxPendingInterrupts = 32;
             System.Random random = new System.Random();
-            public bool ready = false;
+            public uint pc = 0;
+            public uint peripheralBase = 0;
+            Status savedStatus;
 
-            int pic = 0;
-
-            int sp {
-                get { return memory[(int)Register.SP].Int; }
-                set{  memory[(int)Register.SP] = Word.Create(value); }
-            }
-
-            public VirtualCPU(IPeripheral perip) {
-                peripheral = perip;
+            public CPU(IPeripheral peripheral, uint peripheralBase) {
+                this.peripheral = peripheral;
+                this.peripheralBase = peripheralBase;
             }
 
             public void Reset() {
+                registers = new uint[64];
                 memory = null;
                 instructions = null;
-                cmp0 = Word.Create(0);
-                cmp1 = Word.Create(0);
-                flags = Word.Create((uint)Flags.INTERRUPTS_ENABLED);
+                flags = (uint)Flag.INTERRUPTS_ENABLED;
                 pendingInterrupts.Clear();
-                ready = false;
             }
 
-            public abstract class IPeripheral {
-                public abstract Word Read(Word addr);
-                public abstract void Write(Word addr, Word value);
+            public interface IPeripheral {
+                Value32 Read(uint addr);
+                void Write(uint addr, Value32 value);
             }
 
             [Flags]
-            enum Flags : uint {
-                INTERRUPTS_ENABLED = 1 << 0
+            public enum Flag : uint {
+                INTERRUPTS_ENABLED = 1 << 0,
+                EQUAL = 1 << 1,
+                GREATER_THAN = 1 << 2,
+                LESS_THAN = 1 << 3,
+                READY = 1 << 4
             }
 
             [StructLayout(LayoutKind.Explicit)]
-            public struct Word {
+            public struct Value32 {
                 [FieldOffset(0)]
                 public int Int;
                 [FieldOffset(0)]
                 public uint Uint;
                 [FieldOffset(0)]
                 public float Float;
-
-                public static Word Create(int i) {
-                    return new Word{ Int = i };
-                }
-
-                public static Word Create(uint u) {
-                    return new Word{ Uint = u };
-                }
-
-                public static Word Create(float f) {
-                    return new Word{ Float = f };
-                }
+                [FieldOffset(0)]
+                public byte byte0;
+                [FieldOffset(1)]
+                public byte byte1;
+                [FieldOffset(2)]
+                public byte byte2;
+                [FieldOffset(3)]
+                public byte byte3;
             }
 
-            [StructLayout(LayoutKind.Explicit)]
-            public struct Instruction {
-                [FieldOffset(0)]
-                public Word word;
-                [FieldOffset(0)]
-                public Opcode op;
-                [FieldOffset(1)]
-                public sbyte offset0;
-                [FieldOffset(2)]
-                public sbyte offset1;
-                [FieldOffset(3)]
-                public byte argFlags;
-
-                public enum FlagMask : byte {
-                    NUM_ARGS = 3,
-                    ARG0_IS_REGISTER = 4,
-                    ARG1_IS_REGISTER = 8,
-                    ARG2_IS_REGISTER = 16,
-                    ARG0_IS_INDIRECT = 32,
-                    ARG1_IS_INDIRECT = 64,
-                    ARG2_IS_INDIRECT = 128
-                }
-
-                public void SetNumArgs(int num) {
-                    argFlags = (byte)((argFlags & ~3) | num);
-                }
-
-                public void SetArgIsRegister(int argNum, bool value) {
-                    int shift = 2 + argNum;
-                    argFlags = value ? (byte)(argFlags | 1 << shift) : (byte)(argFlags & ~(1 << shift));
-                }
-
-                public void SetArgIsIndirect(int argNum, bool value) {
-                    int shift = 5 + argNum;
-                    argFlags = value ? (byte)(argFlags | 1 << shift) : (byte)(argFlags & ~(1 << shift));
-                }
-
-                public static Instruction Create(Word word) {
-                    return new Instruction{ word = word };
-                }
-
-                public static Instruction Create(int i) {
-                    return new Instruction{ word = new Word{ Int = i } };
-                }
-
-                public static Instruction Create(Opcode op) {
-                    return new Instruction{ op = op, argFlags = 0, offset0 = 0, offset1 = 0 };
-                }
+            public enum Instruction {
+                COND_SHIFT = 29,
+                COND_MASK = 7 << (int)COND_SHIFT,
+                OPCODE_SHIFT = 23,
+                OPCODE_MASK = 0x3F << (int)OPCODE_SHIFT,
+                OP1_FLAG_SHIFT = 22,
+                OP1_FLAG_MASK = 1 << (int)OP1_FLAG_SHIFT,
+                OP1_SHIFT = 16,
+                OP1_MASK = 0x3F << (int)OP1_SHIFT,
+                OP2_FLAG_SHIFT = 15,
+                OP2_FLAG_MASK = 1 << (int)OP2_FLAG_SHIFT,
+                OP2_SHIFT = 9,
+                OP2_MASK = 0x3F << (int)OP2_SHIFT,
+                OP3_FLAG_SHIFT = 8,
+                OP3_FLAG_MASK = 1 << (int)OP3_FLAG_SHIFT,
+                OP3_SHIFT = 2,
+                OP3_MASK = 0x3F << (int)OP3_SHIFT,
+                IMM1_SHIFT = 0,
+                IMM1_MASK = 0x3FFFFF << (int)IMM1_SHIFT,
+                IMM2_SHIFT = 0,
+                IMM2_MASK = 0x7FFF << (int)IMM2_SHIFT,
+                IMM3_SHIFT = 0,
+                IMM3_MASK = 0xFF << (int)IMM3_SHIFT,
+                IMM4_SHIFT = 0,
+                IMM4_MASK = 0x3 << (int)IMM4_SHIFT
+            }
+        
+            public enum Cond {
+                AL, EQ, NE, GT, GE, LT, LE, RESERVED
             }
 
             public enum Register {
@@ -508,38 +725,13 @@ namespace Oxide.Plugins
                 SP, BP
             }
 
-            public enum Opcode : byte {
-                NOP = 0,
-                MOV,
-                JMP,
-                CALL,
-                RET,
-                PUSH,
-                POP,
-                SHRS,
-                SHRU,
-                SHL,
-                CMPI,
-                JE,
-                JNE,
-                JG,
-                JGE,
-                JL,
-                JLE,
-                AND,
-                OR,
-                XOR,
-                NOT,
-                ADD,
-                SUB,
-                MUL,
-                DIV,
-                MOD,
-                IN,
-                OUT,
-                CLI,
-                SEI,
-                RNGI
+            public enum Opcode {
+                RET, CLI, SEI,
+                JMP, JNE, CALL, PUSH, POP,
+                MOV, LDR, LDRB, STR, STRB, CMPI, CMPU,
+                SHRS, SHRU, SHL, AND, OR, XOR, NOT, ADD, SUB, MUL, DIV, MOD,
+                ITOF, FTOI, CMPF, ADDF, SUBF, MULF, DIVF, MODF,
+                RESERVED = 0x3F
             }
 
             public enum Status {
@@ -548,23 +740,12 @@ namespace Oxide.Plugins
                 MISSING_INSTRUCTION,
                 BAD_INSTRUCTION,
                 SEGFAULT,
-                DIVISION_BY_ZERO
+                DIVISION_BY_ZERO,
+                UNDEFINED
             }
 
-            public void LoadProgram(Instruction[] instructions, Word[] memory, int bsp, int pic = 0) {
-                Reset();
-
-                this.instructions = new Instruction[instructions.Length];
-                instructions.CopyTo(this.instructions, 0);
-                this.memory = new Word[memory.Length];
-                memory.CopyTo(this.memory, 0);
-                this.pic = pic;
-                this.sp = bsp;
-                ready = true;
-            }
-
-            public bool Interrupt(int addr) {
-                if(!ready) {
+            public bool Interrupt(uint addr) {
+                if((flags & (uint)Flag.READY) == 0) {
                     return false;
                 }
 
@@ -576,275 +757,382 @@ namespace Oxide.Plugins
                 return true;
             }
 
-            public void Fail(int i) {
-                Print($"Fail({i})");
-                Print($"pic: {pic}");
-                Print($"sp: {sp}");
+            void AssignMemory(uint addr, Value32 val) {
+                //Print($"AssignMemory(uint addr: {addr}, uint value: {value})");
+
+                if(peripheral != null && addr >= peripheralBase) {
+                    peripheral.Write(addr, val);
+                    return;
+                } else if(addr >= memory.Length) {
+                    savedStatus = Status.SEGFAULT;
+                    return;
+                }
+
+                memory[addr + 0] = val.byte0;
+                memory[addr + 1] = val.byte1;
+                memory[addr + 2] = val.byte2;
+                memory[addr + 3] = val.byte3;
             }
 
-            public bool Cycle(out Status status) {
-                int ctr = 0;
+            void AssignMemory(uint addr, uint val) {
+                AssignMemory(addr, new Value32 { Uint = val });
+            }
 
-                if(pic < 0 || pic >= instructions.Length) {
-                    Fail(ctr++);
-                    status = Status.OUT_OF_INSTRUCTIONS;
-                    return false;
+            Value32 ReadMemory(uint addr) {
+                if(peripheral != null && addr >= peripheralBase) {
+                    return peripheral.Read(addr);
+                } else if(addr >= memory.Length) {
+                    savedStatus = Status.SEGFAULT;
+                    return new Value32 { Uint = 0 };
                 }
 
-                if(sp < 0 || sp >= memory.Length) {
-                    Fail(ctr++);
-                    status = Status.SEGFAULT;
-                    return false;
-                }
+                Value32 val = new Value32 {
+                    byte0 = memory[addr + 0],
+                    byte1 = memory[addr + 1],
+                    byte2 = memory[addr + 2],
+                    byte3 = memory[addr + 3]
+                };
 
-                if((flags.Int & (int)Flags.INTERRUPTS_ENABLED) != 0 && pendingInterrupts.Count != 0) {
-                    int addr = pendingInterrupts.Dequeue();
+                //Print($"ReadMemory(uint addr: {addr}) -> uint: {val.Uint}");
+                return val;
+            }
 
-                    Print($"dequeued interrupt, addr: {addr}");
+            public bool Cycle(out Status status, int numCycles = 1) {
+                savedStatus = Status.UNDEFINED;
 
-                    memory[sp++].Int = pic;
-                    pic = addr;
-
-                    if(pic < 0 || pic >= instructions.Length) {
-                        Fail(ctr++);
-                        status = Status.OUT_OF_INSTRUCTIONS;
+                for(int i = 0; i < numCycles; i++) {
+                    if(savedStatus != Status.UNDEFINED) {
+                        status = savedStatus;
                         return false;
                     }
 
-                    if(sp < 0 || sp >= memory.Length) {
-                        Fail(ctr++);
-                        status = Status.SEGFAULT;
-                        return false;
-                    }
-                }
+                    if((flags & (uint)Flag.INTERRUPTS_ENABLED) != 0 && pendingInterrupts.Count != 0) {
+                        uint addr = pendingInterrupts.Dequeue();
 
-                Instruction inst = instructions[pic++];
-                int numArgs = inst.argFlags & (int)Instruction.FlagMask.NUM_ARGS;
-                Word arg0 = Word.Create(0), arg1 = arg0;
-                Word addr0 = Word.Create(0), addr1 = addr0;
-                bool handledHere;
+                        AssignMemory(registers[(int)Register.SP], pc);
+                        registers[(int)Register.SP] += 4;
+                        pc = addr;
 
-                /*Print($"pic: {pic}, sp: {sp}");
-                Print($"inst: {inst.op}");
-                Print($"offset0: {Convert.ToString((byte)inst.offset0, 2).PadLeft(8, '0')}");
-                Print($"offset1: {Convert.ToString((byte)inst.offset1, 2).PadLeft(8, '0')}");
-                Print($"numArgs: {numArgs}");
-                Print($"argFlags: {Convert.ToString((byte)inst.argFlags, 2).PadLeft(8, '0')}");*/
-
-                if(numArgs >= 1) {
-                    if(pic < 0 || pic >= instructions.Length) {
-                        Fail(ctr++);
-                        status = Status.OUT_OF_INSTRUCTIONS;
-                        return false;
-                    }
-
-                    arg0 = instructions[pic++].word;
-                }
-
-                if(numArgs >= 2) {
-                    if(pic < 0 || pic >= instructions.Length) {
-                        Fail(ctr++);
-                        status = Status.OUT_OF_INSTRUCTIONS;
-                        return false;
-                    }
-
-                    arg1 = instructions[pic++].word;
-                }
-
-                addr0 = arg0;
-                addr1 = arg1;
-
-                if((inst.argFlags & (byte)Instruction.FlagMask.ARG0_IS_REGISTER) != 0) {
-                    if(arg0.Int < 0 || arg0.Int >= memory.Length) {
-                        Fail(ctr++);
-                        status = Status.SEGFAULT;
-                        return false;
-                    }
-
-                    arg0 = memory[addr0.Int];
-                }
-
-                if((inst.argFlags & (byte)Instruction.FlagMask.ARG1_IS_REGISTER) != 0) {
-                    if(arg1.Int < 0 || arg1.Int >= memory.Length) {
-                        Fail(ctr++);
-                        status = Status.SEGFAULT;
-                        return false;
-                    }
-
-                    arg1 = memory[addr1.Int];
-                }
-
-                if((inst.argFlags & (byte)Instruction.FlagMask.ARG0_IS_INDIRECT) != 0) {
-                    //Print($"inst.offset0: {inst.offset0}");
-                    //Print($"arg0.Int: {arg0.Int}");
-                    //Print($"arg0.Int + inst.offset0: {arg0.Int + inst.offset0}");
-
-                    addr0.Int = arg0.Int + inst.offset0;
-
-                    if(addr0.Int < 0 || addr0.Int >= memory.Length) {
-                        Fail(ctr++);
-                        status = Status.SEGFAULT;
-                        return false;
-                    }
-
-                    arg0 = memory[addr0.Int];
-                }
-
-                if((inst.argFlags & (byte)Instruction.FlagMask.ARG1_IS_INDIRECT) != 0) {
-                    //Print($"inst.offset1: {inst.offset1}");
-                    //Print($"arg1.Int: {arg1.Int}");
-                    //Print($"arg1.Int + inst.offset1: {arg1.Int + inst.offset1}");
-
-                    addr1.Int = arg1.Int + inst.offset1;
-
-                    if(addr1.Int < 0 || addr1.Int >= memory.Length) {
-                        Fail(ctr++);
-                        status = Status.SEGFAULT;
-                        return false;
-                    }
-
-                    arg1 = memory[addr1.Int];
-                }
-
-                handledHere = true;
-
-                // these require no additional checks
-                switch(inst.op) {
-                    case Opcode.JMP:
-                        pic = arg0.Int;
-                        break;
-                    case Opcode.CALL:
-                        memory[sp++].Int = pic;
-                        pic = arg0.Int;
-                        break;
-                    case Opcode.RET:
-                        pic = memory[sp-- - 1].Int;
-                        break;
-                    case Opcode.PUSH:
-                        memory[sp++] = arg0;
-                        break;
-                    case Opcode.CMPI:
-                        cmp0.Int = arg0.Int;
-                        cmp1.Int = arg1.Int;
-                        break;
-                    case Opcode.JE:
-                        pic = (cmp0.Int == cmp1.Int) ? arg0.Int : pic;
-                        break;
-                    case Opcode.JNE:
-                        pic = (cmp0.Int != cmp1.Int) ? arg0.Int : pic;
-                        break;
-                    case Opcode.JG:
-                        pic = (cmp0.Int > cmp1.Int) ? arg0.Int : pic;
-                        break;
-                    case Opcode.JGE:
-                        pic = (cmp0.Int >= cmp1.Int) ? arg0.Int : pic;
-                        break;
-                    case Opcode.JL:
-                        pic = (cmp0.Int < cmp1.Int) ? arg0.Int : pic;
-                        break;
-                    case Opcode.JLE:
-                        pic = (cmp0.Int <= cmp1.Int) ? arg0.Int : pic;
-                        break;
-                    case Opcode.CLI:
-                        flags.Uint &= ~(uint)Flags.INTERRUPTS_ENABLED;
-                        break;
-                    case Opcode.SEI:
-                        flags.Uint |= (uint)Flags.INTERRUPTS_ENABLED;
-                        break;
-                    case Opcode.OUT:
-                        if(peripheral != null) {
-                            peripheral.Write(arg0, arg1);
+                        if(savedStatus != Status.UNDEFINED) {
+                            status = savedStatus;
+                            return false;
                         }
+                    }
 
-                        break;
-                    default:
-                        handledHere = false;
-                        break;
-                }
+                    if(pc >= instructions.Length) {
+                        status = Status.OUT_OF_INSTRUCTIONS;
+                        return false;
+                    }
 
-                if(handledHere) {
-                    status = Status.SUCCESS;
-                    return true;
-                }
+                    uint inst = instructions[pc++];
+                    Opcode opcode = (Opcode)((inst & (uint)Instruction.OPCODE_MASK) >> (int)Instruction.OPCODE_SHIFT);
+                    Cond cond = (Cond)((inst & (int)Instruction.COND_MASK) >> (int)Instruction.COND_SHIFT);
 
-                // I had a reason to separate these before
+                    /*PrintVar(nameof(pc), pc);
+                    Print($"instruction: {opcode}.{cond}");
+                    Print($"instruction bits: {Convert.ToString(inst, 2).PadLeft(32, '0')}");
+                    Print($"flags: {Convert.ToString(flags & (uint)Flag.EQUAL, 2).PadLeft(32, '0')}");*/
 
-                handledHere = true;
+                    switch(cond) {
+                        case Cond.EQ:
+                            if((flags & (uint)Flag.EQUAL) != 0) {
+                                break;
+                            }
 
-                switch(inst.op) {
-                    case Opcode.MOV:
-                        memory[addr0.Int] = arg1;
-                        break;
-                    case Opcode.POP:
-                        memory[addr0.Int] = memory[sp-- - 1];
-                        break;
-                    case Opcode.SHRS:
-                        memory[addr0.Int].Int = arg0.Int >> arg1.Int;
-                        break;
-                    case Opcode.SHRU:
-                        memory[addr0.Int].Uint = arg0.Uint >> arg1.Int;
-                        break;
-                    case Opcode.SHL:
-                        memory[addr0.Int].Int = arg0.Int << arg1.Int;
-                        break;
-                    case Opcode.AND:
-                        memory[addr0.Int].Int = arg0.Int & arg1.Int;
-                        break;
-                    case Opcode.OR:
-                        memory[addr0.Int].Int = arg0.Int | arg1.Int;
-                        break;
-                    case Opcode.XOR:
-                        memory[addr0.Int].Int = arg0.Int ^ arg1.Int;
-                        break;
-                    case Opcode.NOT:
-                        memory[addr0.Int].Int = ~arg0.Int;
-                        break;
-                    case Opcode.ADD:
-                        memory[addr0.Int].Int = arg0.Int + arg1.Int;
-                        break;
-                    case Opcode.SUB:
-                        memory[addr0.Int].Int = arg0.Int - arg1.Int;
-                        break;
-                    case Opcode.MUL:
-                        memory[addr0.Int].Int = arg0.Int * arg1.Int;
-                        break;
-                    case Opcode.DIV:
-                        if(arg1.Int == 0) {
-                            status = Status.DIVISION_BY_ZERO;
+                            continue;
+                        case Cond.NE:
+                            if((flags & (uint)Flag.EQUAL) == 0) {
+                                break;
+                            }
+
+                            continue;
+                        case Cond.GT:
+                            if((flags & (uint)Flag.GREATER_THAN) != 0) {
+                                break;
+                            }
+
+                            continue;
+                        case Cond.LT:
+                            if((flags & (uint)Flag.LESS_THAN) != 0) {
+                                break;
+                            }
+
+                            continue;
+                        case Cond.GE:
+                            if((flags & (uint)(Flag.GREATER_THAN | Flag.EQUAL)) != 0) {
+                                break;
+                            }
+
+                            continue;
+                        case Cond.LE:
+                            if((flags & (uint)(Flag.LESS_THAN | Flag.EQUAL)) != 0) {
+                                break;
+                            }
+
+                            continue;
+                    }
+
+                    bool handledHere = true;
+
+                    // zero arg instructions
+                    switch(opcode) {
+                        case Opcode.RET:
+                            registers[(int)Register.SP] -= 4;
+                            pc = ReadMemory(registers[(int)Register.SP]).Uint;
+                            break;
+                        case Opcode.CLI:
+                            flags &= ~(uint)Flag.INTERRUPTS_ENABLED;
+                            break;
+                        case Opcode.SEI:
+                            flags |= (uint)Flag.INTERRUPTS_ENABLED;
+                            break;
+                        default:
+                            handledHere = false;
+                            break;
+                    }
+
+                    if(handledHere) {
+                        if(savedStatus == Status.UNDEFINED) {
+                            status = Status.SUCCESS;
+                            continue;
+                        } else {
+                            status = savedStatus;
+                            return false;
+                        }
+                    }
+
+                    uint op1 = (inst & (uint)Instruction.OP1_MASK) >> (int)Instruction.OP1_SHIFT;
+                    uint op1Flag = inst & (uint)Instruction.OP1_FLAG_MASK;
+                    uint imm1 = (inst & (uint)Instruction.IMM1_MASK) >> (int)Instruction.IMM1_SHIFT;
+
+                    if(op1Flag == 0 && imm1 == (uint)Instruction.IMM1_MASK) {
+                        if(pc >= instructions.Length) {
+                            status = Status.OUT_OF_INSTRUCTIONS;
                             return false;
                         }
 
-                        memory[addr0.Int].Int = arg0.Int / arg1.Int;
-                        break;
-                    case Opcode.MOD:
-                        if(arg1.Int == 0) {
-                            status = Status.DIVISION_BY_ZERO;
+                        imm1 = instructions[pc++];
+                    }
+
+                    uint arg1 = (op1Flag != 0) ? registers[op1] : imm1;
+                    // just testing this, if it's not slower, arg1 will just be a Value32
+                    Value32 arg1v = new Value32 { Uint = arg1 };
+                    handledHere = true;
+
+                    /*PrintVar(nameof(op1), op1);
+                    PrintVar(nameof(op1Flag), op1Flag);
+                    PrintVar(nameof(imm1), imm1);
+                    PrintVar(nameof(arg1), arg1);*/
+
+                    // one arg instructions
+                    switch(opcode) {
+                        case Opcode.JMP:
+                            pc = arg1;
+                            break;
+                        case Opcode.CALL:
+                            AssignMemory(registers[(int)Register.SP], pc);
+                            registers[(int)Register.SP] += 4;
+                            pc = arg1;
+                            break;
+                        case Opcode.PUSH:
+                            AssignMemory(registers[(int)Register.SP], arg1);
+                            registers[(int)Register.SP] += 4;
+                            break;
+                        case Opcode.POP:
+                            registers[(int)Register.SP] -= 4;
+                            registers[op1] = ReadMemory(registers[(int)Register.SP]).Uint;
+                            break;
+                        case Opcode.ITOF:
+                            var itof = new Value32 { Uint = registers[op1] };
+                            itof.Float = (float)itof.Int;
+                            registers[op1] = itof.Uint;
+                            break;
+                        case Opcode.FTOI:
+                            var ftoi = new Value32 { Uint = registers[op1] };
+                            ftoi.Int = (int)ftoi.Float;
+                            registers[op1] = ftoi.Uint;
+                            break;
+                        default:
+                            handledHere = false;
+                            break;
+                    }
+
+                    if(handledHere) {
+                        continue;
+                    }
+
+                    uint op2 = (inst & (uint)Instruction.OP2_MASK) >> (int)Instruction.OP2_SHIFT;
+                    uint op2Flag = inst & (uint)Instruction.OP2_FLAG_MASK;
+                    uint imm2 = (inst & (uint)Instruction.IMM2_MASK) >> (int)Instruction.IMM2_SHIFT;
+
+                    if(op2Flag == 0 && imm2 == (uint)Instruction.IMM2_MASK) {
+                        if(pc >= instructions.Length) {
+                            status = Status.OUT_OF_INSTRUCTIONS;
                             return false;
                         }
 
-                        memory[addr0.Int].Int = arg0.Int % arg1.Int;
-                        break;
-                    case Opcode.IN:
-                        if(peripheral != null) {
-                            memory[addr0.Int] = peripheral.Read(arg1);
+                        imm2 = instructions[pc++];
+                    }
+
+                    uint arg2 = (op2Flag != 0) ? registers[op2] : imm2;
+                    Value32 arg2v = new Value32 { Uint = arg2 };
+                    handledHere = true;
+
+                    /*PrintVar(nameof(op2), op2);
+                    PrintVar(nameof(op2Flag), op2Flag);
+                    PrintVar(nameof(imm2), imm2);
+                    PrintVar(nameof(arg2), arg2);*/
+
+                    // two arg instructions
+                    switch(opcode) {
+                        case Opcode.MOV:
+                            registers[op1] = arg2;
+                            break;
+                        case Opcode.LDR:
+                            registers[op1] = ReadMemory(arg2).Uint;
+                            break;
+                        case Opcode.STR:
+                            AssignMemory(arg2, arg1);
+                            break;
+                        case Opcode.CMPI:
+                            flags = ((int)arg1 == (int)arg2) ? flags | (uint)Flag.EQUAL : flags & ~(uint)Flag.EQUAL;
+                            flags = ((int)arg1 > (int)arg2) ? flags | (uint)Flag.GREATER_THAN : flags & ~(uint)Flag.GREATER_THAN;
+                            flags = ((int)arg1 < (int)arg2) ? flags | (uint)Flag.LESS_THAN : flags & ~(uint)Flag.LESS_THAN;
+                            break;
+                        case Opcode.CMPU:
+                            flags = (arg1 == arg2) ? flags | (uint)Flag.EQUAL : flags & ~(uint)Flag.EQUAL;
+                            flags = (arg1 > arg2) ? flags | (uint)Flag.GREATER_THAN : flags & ~(uint)Flag.GREATER_THAN;
+                            flags = (arg1 < arg2) ? flags | (uint)Flag.LESS_THAN : flags & ~(uint)Flag.LESS_THAN;
+                            break;
+                        case Opcode.CMPF:
+                            flags = (arg1v.Float == arg2v.Float) ? flags | (uint)Flag.EQUAL : flags & ~(uint)Flag.EQUAL;
+                            flags = (arg1v.Float > arg2v.Float) ? flags | (uint)Flag.GREATER_THAN : flags & ~(uint)Flag.GREATER_THAN;
+                            flags = (arg1v.Float < arg2v.Float) ? flags | (uint)Flag.LESS_THAN : flags & ~(uint)Flag.LESS_THAN;
+                            break;
+                        default:
+                            handledHere = false;
+                            break;
+                    }
+
+                    if(handledHere) {
+                        continue;
+                    }
+
+                    uint op3 = (inst & (uint)Instruction.OP3_MASK) >> (int)Instruction.OP3_SHIFT; 
+                    uint op3Flag = inst & (uint)Instruction.OP3_FLAG_MASK;
+                    uint imm3 = (inst & (uint)Instruction.IMM3_MASK) >> (int)Instruction.IMM3_SHIFT;
+
+                    if(op3Flag == 0 && imm3 == (uint)Instruction.IMM3_MASK) {
+                        if(pc >= instructions.Length) {
+                            status = Status.OUT_OF_INSTRUCTIONS;
+                            return false;
                         }
 
-                        break;
-                    case Opcode.RNGI:
-                        memory[addr0.Int] = Word.Create(random.Next());
-                        break;
-                    default:
-                        handledHere = false;
-                        break;
+                        imm3 = instructions[pc++];
+                    }
+
+                    uint arg3 = (op3Flag != 0) ? registers[op3] : imm3;
+                    Value32 arg3v = new Value32 { Uint = arg3 };
+                    handledHere = true;
+
+                    /*PrintVar(nameof(op3), op3);
+                    PrintVar(nameof(op3Flag), op3Flag);
+                    PrintVar(nameof(imm3), imm3);
+                    PrintVar(nameof(arg3), arg3);*/
+
+                    // three arg instructions
+                    switch(opcode) {
+                        case Opcode.SHRS:
+                            registers[op1] = (uint)((int)arg2 >> (int)arg3);
+                            break;
+                        case Opcode.SHRU:
+                            registers[op1] = arg2 >> (int)arg3;
+                            break;
+                        case Opcode.SHL:
+                            registers[op1] = arg2 << (int)arg3;
+                            break;
+                        case Opcode.AND:
+                            registers[op1] = arg2 & arg3;
+                            break;
+                        case Opcode.OR:
+                            registers[op1] = arg2 | arg3;
+                            break;
+                        case Opcode.XOR:
+                            registers[op1] = arg2 ^ arg3;
+                            break;
+                        case Opcode.NOT:
+                            registers[op1] = ~arg2;
+                            break;
+                        case Opcode.ADD:
+                            registers[op1] = arg2 + arg3;
+                            break;
+                        case Opcode.SUB:
+                            registers[op1] = arg2 - arg3;
+                            break;
+                        case Opcode.MUL:
+                            registers[op1] = arg2 * arg3;
+                            break;
+                        case Opcode.DIV:
+                            if(arg2 == 0) {
+                                status = Status.DIVISION_BY_ZERO;
+                                return false;
+                            }
+
+                            registers[op1] = arg2 / arg3;
+                            break;
+                        case Opcode.MOD:
+                            if(arg2 == 0) {
+                                status = Status.DIVISION_BY_ZERO;
+                                return false;
+                            }
+
+                            registers[op1] = arg2 % arg3;
+                            break;
+                        case Opcode.ADDF:
+                            registers[op1] = new Value32 { Float = arg2v.Float + arg3v.Float }.Uint;
+                            break;
+                        case Opcode.SUBF:
+                            registers[op1] = new Value32 { Float = arg2v.Float - arg3v.Float }.Uint;
+                            break;
+                        case Opcode.MULF:
+                            registers[op1] = new Value32 { Float = arg2v.Float * arg3v.Float }.Uint;
+                            break;
+                        case Opcode.DIVF:
+                            if(arg2v.Float == 0) {
+                                status = Status.DIVISION_BY_ZERO;
+                                return false;
+                            }
+
+                            registers[op1] = new Value32 { Float = arg2v.Float / arg3v.Float }.Uint;
+                            break;
+                        case Opcode.MODF:
+                            if(arg2v.Float == 0) {
+                                status = Status.DIVISION_BY_ZERO;
+                                return false;
+                            }
+
+                            registers[op1] = new Value32 { Float = arg2v.Float % arg3v.Float }.Uint;
+                            break;
+                        default:
+                            handledHere = false;
+                            break;
+                    }
+
+                    if(handledHere) {
+                        continue;
+                    }
+
+                    status = Status.MISSING_INSTRUCTION;
+                    return false;
                 }
 
-                if(handledHere) {
+                if(savedStatus != Status.UNDEFINED) {
+                    status = savedStatus;
+                    return false;
+                } else {
                     status = Status.SUCCESS;
                     return true;
                 }
-
-                status = Status.MISSING_INSTRUCTION;
-                return false;
             }
         }
 
@@ -864,7 +1152,7 @@ namespace Oxide.Plugins
         void Init() {
             config = Config.ReadObject<ConfigData>();
             plugin = this;
-            assembler = new VirtualCPUAssembler();
+            assembler = new Assembler();
 
             //Puts($"new GUID: {Guid.NewGuid()}");
         }
@@ -873,61 +1161,6 @@ namespace Oxide.Plugins
             var go = new GameObject(McuManager.Guid);
             manager = go.AddComponent<McuManager>();
             manager.Init(this);
-
-            /*var cpu = new VirtualCPU(null);
-
-            bool success = assembler.Compile(@"
-            .word a 0
-            .word b 0
-            .word c 0
-            .word d 0
-
-            jmp main
-
-            func:
-                mov [sp+15] 0
-                mov [sp+0xF] 0
-                mov [sp+0b1111] 0
-                mov [sp-16] 0
-                mov [sp-0x10] 0
-                mov [sp-0b10000] 0
-                mov [sp+7] [sp-8]
-                #mov [sp+100] [sp-100]
-                ret
-
-            main:
-                call func
-                jmp main
-            ", 1024);
-
-            if(success) {
-                cpu.LoadProgram(assembler.instructions.ToArray(), assembler.memory, assembler.programData.Count);
-            } else {
-                foreach(var error in assembler.errors) {
-                    Puts(error);
-                }
-
-                return;
-            }
-
-            const int numCycles = 1000000;
-            VirtualCPU.Status st;
-
-            if(!cpu.Cycle(out st)) {
-                Print($"cpu error: {st.ToString()}");
-            }
-
-            float startTime = Time.realtimeSinceStartup;
-
-            for(int i = 0; i < numCycles; i++) {
-                if(!cpu.Cycle(out st)) {
-                    Print($"cpu error: {st.ToString()}");
-                    break;
-                }
-            }
-
-            float elapsedTime = Time.realtimeSinceStartup - startTime;
-            Print($"{numCycles} in {elapsedTime}s ({numCycles / elapsedTime} instructions/s)");*/
         }
 
         void Unload() {
@@ -1015,32 +1248,6 @@ namespace Oxide.Plugins
             });
 
             ignoreSpawn = false;
-
-            // bind p "give note 10;env.time 12;god true;give hammer;give planner;give wood 5000;give stones 5000;give wiretool;give electric.solarpanel.large;give electric.random.switch;give ceilinglight 4"
-            /*bool success = assembler.Compile(comp.setupCode + @"
-            out channel 0
-            out output_energy 2
-            out channel 1
-            out output_energy 2
-            out channel 2
-            out output_energy 2
-            out channel 3
-            out output_energy 2
-
-            loop:
-                rngi r0
-                out output_mask r0
-                jmp loop
-            ", 1024);
-
-            if(success) {
-                comp.cpu.LoadProgram(assembler.instructions.ToArray(), assembler.memory, assembler.programData.Count);
-            } else {
-                foreach(var error in assembler.errors) {
-                    Puts(error);
-                }
-            }*/
-
             McuComponents.Add(comp.id, comp);
         }
 
@@ -1063,7 +1270,7 @@ namespace Oxide.Plugins
         protected override void LoadDefaultConfig() {
             var config = new ConfigData {
                 maxProgramInstructions = 512,
-                maxInstructionsPerCycle = 32,
+                maxInstructionsPerCycle = 1,
                 CPUFreq = 10
             };
 
@@ -1119,45 +1326,42 @@ namespace Oxide.Plugins
             public int[] inputEnergies = new int[numChannels];
             public int[] outputEnergies = new int[numChannels];
             public int[] maskedOutputEnergies = new int[numChannels];
-            public VirtualCPU cpu = null;
+            public CPU cpu = null;
             public BaseEntity stash = null;
             public float lastUpdateTime = 0;
             public bool wantsUpdate = false;
             public string setupCode = @"
-            .const channel 0
-            .const output_energy 1
-            .const input_energy 2
-            .const output_mask 3
-            .const update 4
-
-            jmp user_code
+            .const channel 0x80000000
+            .const output_energy 0x80000001
+            .const input_energy 0x80000002
+            .const output_mask 0x80000003
+            .const update 0x80000004
 
             input:
                 jmp input_stub
 
             input_stub:
                 ret
-
-            user_code:
             ";
 
             public McuComponent() {
-                cpu = new VirtualCPU(new Peripheral(this));
+                cpu = new CPU(new Peripheral(this), (uint)Peripheral.Port.BASE_ADDR);
                 id = idCtr++;
             }
 
-            class Peripheral : VirtualCPU.IPeripheral {
+            class Peripheral : CPU.IPeripheral {
                 McuComponent comp = null;
                 int[] desiredOutputEnergies = null;
                 int selectedChannel = 0;
                 int outputMask = 0;
 
-                enum Port {
-                    CHANNEL,
-                    OUTPUT_ENERGY,
-                    INPUT_ENERGY,
-                    OUTPUT_MASK,
-                    UPDATE
+                public enum Port : uint {
+                    BASE_ADDR = 0x80000000,
+                    CHANNEL = BASE_ADDR,
+                    OUTPUT_ENERGY = BASE_ADDR + 1,
+                    INPUT_ENERGY = BASE_ADDR + 2,
+                    OUTPUT_MASK = BASE_ADDR + 3,
+                    UPDATE = BASE_ADDR + 4
                 }
                 
                 public Peripheral(McuComponent comp) {
@@ -1166,6 +1370,10 @@ namespace Oxide.Plugins
                 }
 
                 public void UpdateMaskedOutputEnergies() {
+                    Print("UpdateMaskedOutputEnergies");
+                    Print($"outputMask: {Convert.ToString(outputMask, 2).PadLeft(32, '0')}");
+                    Print($"desiredOutputEnergies: [{String.Join(", ", desiredOutputEnergies)}]");
+
                     for(int i = 0; i < desiredOutputEnergies.Length; i++) {
                         comp.maskedOutputEnergies[i] = ((outputMask & (1 << i)) != 0) ? desiredOutputEnergies[i] : 0;
                     }
@@ -1173,23 +1381,27 @@ namespace Oxide.Plugins
                     comp.UpdateMaskedOutput();
                 }
 
-                public override VirtualCPU.Word Read(VirtualCPU.Word addr) {
-                    switch((Port)addr.Int) {
+                public CPU.Value32 Read(uint addr) {
+                    Print($"CPU.Value32 Read(uint addr: {addr})");
+
+                    switch((Port)addr) {
                         case Port.CHANNEL:
-                            return VirtualCPU.Word.Create(selectedChannel);
+                            return new CPU.Value32 { Int = selectedChannel };
                         case Port.OUTPUT_ENERGY:
-                            return VirtualCPU.Word.Create(comp.outputEnergies[selectedChannel]);
+                            return new CPU.Value32 { Int = comp.outputEnergies[selectedChannel] };
                         case Port.INPUT_ENERGY:
-                            return VirtualCPU.Word.Create(comp.inputEnergies[selectedChannel]);
+                            return new CPU.Value32 { Int = comp.inputEnergies[selectedChannel] };
                         case Port.OUTPUT_MASK:
-                            return VirtualCPU.Word.Create(outputMask);
+                            return new CPU.Value32 { Int = outputMask };
                     }
 
-                    return VirtualCPU.Word.Create(0);
+                    return new CPU.Value32 { Int = 0 };
                 }
 
-                public override void Write(VirtualCPU.Word addr, VirtualCPU.Word value) {
-                    switch((Port)addr.Int) {
+                public void Write(uint addr, CPU.Value32 value) {
+                    Print($"void Write(uint addr: {addr}, CPU.Value32 value: {value.Int}");
+
+                    switch((Port)addr) {
                         case Port.CHANNEL:
                             selectedChannel = Math.Max(0, Math.Min(value.Int, desiredOutputEnergies.Length - 1));
                             break;
@@ -1327,7 +1539,7 @@ namespace Oxide.Plugins
                                         }));
                                     } else {
                                         Print("loaded instructions");
-                                        cpu.LoadProgram(assembler.instructions.ToArray(), assembler.memory, assembler.programData.Count);
+                                        assembler.LoadProgramToCPU(cpu);
                                     }
                                 } else {
                                     message = string.Format(plugin.lang.GetMessage("over_instruction_limit", plugin), config.maxProgramInstructions);
@@ -1352,9 +1564,9 @@ namespace Oxide.Plugins
                 }
 
                 int numInstructionsExecuted = 0;
-                VirtualCPU.Status status;
+                CPU.Status status;
 
-                while(numInstructionsExecuted < config.maxInstructionsPerCycle && cpu.ready) {
+                while(numInstructionsExecuted < config.maxInstructionsPerCycle && (cpu.flags & (uint)CPU.Flag.READY) != 0) {
                     if(!cpu.Cycle(out status)) {
                         Print(status.ToString());
                         Reset();

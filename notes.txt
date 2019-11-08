@@ -32,3 +32,5 @@ Layers, ones that projectiles hit (dnSpy) are True:
 29 "Prevent Building" False
 30 "Tree" True
 31 "Impostor" False
+
+bind p "give note 10;env.time 12;god true;give hammer;give planner;give wood 5000;give stones 5000;give wiretool;give electric.solarpanel.large;give electric.random.switch;give ceilinglight 4"
