@@ -1248,32 +1248,6 @@ namespace Oxide.Plugins
             });
 
             ignoreSpawn = false;
-
-            // bind p "give note 10;env.time 12;god true;give hammer;give planner;give wood 5000;give stones 5000;give wiretool;give electric.solarpanel.large;give electric.random.switch;give ceilinglight 4"
-            /*bool success = assembler.Compile(comp.setupCode + @"
-            out channel 0
-            out output_energy 2
-            out channel 1
-            out output_energy 2
-            out channel 2
-            out output_energy 2
-            out channel 3
-            out output_energy 2
-
-            loop:
-                rngi r0
-                out output_mask r0
-                jmp loop
-            ", 1024);
-
-            if(success) {
-                comp.cpu.LoadProgram(assembler.instructions.ToArray(), assembler.memory, assembler.programData.Count);
-            } else {
-                foreach(var error in assembler.errors) {
-                    Puts(error);
-                }
-            }*/
-
             McuComponents.Add(comp.id, comp);
         }
 
