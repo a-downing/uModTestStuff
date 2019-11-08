@@ -1,23 +1,29 @@
 #asm
-out channel 0
-out output_energy 2
-out channel 1
-out output_energy 2
-out channel 2
-out output_energy 2
-out channel 3
-out output_energy 2
+mov r1 2
 
-jmp loop
+mov r0 0
+str r0 channel
+str r1 output_energy
 
-#.isr input on_input_change
+mov r0 0
+str r0 channel
+str r1 output_energy
+
+mov r0 0
+str r0 channel
+str r1 output_energy
+
+mov r0 0
+str r0 channel
+str r1 output_energy
+
+.isr input on_input_change
 on_input_change:
-    rngi 0
-    out output_mask r0
     ret
 
-loop:
-    rngi r0
-    out output_mask r0
-    out update 0
-    jmp loop
+main:
+    #rngi r0
+    mov r0 0xFFFFFFFF
+    str r0 output_mask
+    str r0 update
+    jmp main

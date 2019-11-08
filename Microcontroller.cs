@@ -1379,15 +1379,11 @@ namespace Oxide.Plugins
             .const output_mask 3
             .const update 4
 
-            jmp user_code
-
             input:
                 jmp input_stub
 
             input_stub:
                 ret
-
-            user_code:
             ";
 
             public McuComponent() {
