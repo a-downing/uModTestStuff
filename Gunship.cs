@@ -129,7 +129,7 @@ namespace Oxide.Plugins
                             bestTarget = ent;
                         }
 
-                        Print($"ent.name: {ent.name}");
+                        //Print($"ent.name: {ent.name}");
                     }
 
                     if(bestTarget && launcherDist > 5.0f) {
